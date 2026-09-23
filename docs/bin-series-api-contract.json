@@ -1,0 +1,292 @@
+{
+  "title": "Pine Labs Helpdesk — BIN Series API Contract",
+  "version": "Part 17",
+  "lastUpdated": "2026-09-22",
+  "baseUrl": "/api/v1/bin-series",
+  "authentication": {
+    "type": "Bearer token",
+    "header": "Authorization: Bearer <token>",
+    "appliesTo": "Every endpoint in this document",
+    "currentStatus": "Authentication boundary implemented; production identity-provider validation remains pending Pine Labs SSO/OIDC configuration. Every request is currently rejected with 401 AUTH_PROVIDER_NOT_CONFIGURED regardless of the token supplied, until a real provider is wired up.",
+    "actorHandling": "There is no client-suppliable actor/user field anywhere in these APIs. The acting user for audit logging and updatedBy is always derived server-side from the authenticated caller."
+  },
+  "errorFormat": {
+    "description": "Every error response (any non-2xx) uses this envelope.",
+    "shape": {
+      "error": {
+        "code": "string",
+        "message": "string",
+        "details": "any | null"
+      }
+    }
+  },
+  "commonErrorCodes": [
+    { "code": "AUTH_MISSING_CREDENTIALS", "httpStatus": 401, "meaning": "No/malformed Authorization header." },
+    { "code": "AUTH_PROVIDER_NOT_CONFIGURED", "httpStatus": 401, "meaning": "Real identity provider not yet configured (current state for every token)." },
+    { "code": "VALIDATION_ERROR", "httpStatus": 422, "meaning": "Request shape/format failed schema validation (bad field type, pattern, required field missing/blank)." },
+    { "code": "BIN_RECORD_NOT_FOUND", "httpStatus": 404, "meaning": "No BIN record exists for the given id / (binIin, merchantPrefix) pair." },
+    { "code": "BIN_RECORD_ALREADY_EXISTS", "httpStatus": 409, "meaning": "A BIN record already exists with this exact (binIin, merchantPrefix)." },
+    { "code": "BIN_MERCHANT_NOT_FOUND", "httpStatus": 422, "meaning": "merchantId was supplied but does not reference an existing merchant." },
+    { "code": "BIN_INSTANCE_NAME_REQUIRED", "httpStatus": 422, "meaning": "On update: instanceName was explicitly sent as null, or the update would leave the record without one." }
+  ],
+  "schemas": {
+    "BinRecordResponse": {
+      "description": "Returned by list, resolve, create, and update.",
+      "fields": {
+        "id": { "type": "integer" },
+        "issuer": { "type": "string" },
+        "cardProgramGroupName": { "type": "string" },
+        "binIin": { "type": "string", "format": "exactly 6 digits" },
+        "merchantPrefix": { "type": "string", "format": "exactly 3 digits" },
+        "merchantId": { "type": "integer | null", "note": "Soft link to the merchants table (SOP/classification domain). Not a business-name field." },
+        "instanceName": { "type": "string | null", "note": "Null for legacy records created before this field existed (all 611 originally seeded records)." },
+        "updatedBy": { "type": "string | null", "note": "Name of the user who last created/updated this record via the write APIs. Null if never touched by them (e.g. seeded data)." },
+        "updatedAt": { "type": "string | null", "format": "ISO-8601 timestamp" }
+      }
+    },
+    "CreateBinRecordRequest": {
+      "fields": {
+        "issuer": { "type": "string", "required": true, "rule": "non-blank" },
+        "cardProgramGroupName": { "type": "string", "required": true, "rule": "non-blank" },
+        "binIin": { "type": "string", "required": true, "rule": "exactly 6 digits" },
+        "merchantPrefix": { "type": "string", "required": true, "rule": "exactly 3 digits" },
+        "merchantId": { "type": "integer | null", "required": false, "rule": "if supplied, must reference an existing merchant" },
+        "instanceName": { "type": "string", "required": true, "rule": "must not be missing, null, empty, or whitespace-only; trimmed server-side" }
+      }
+    },
+    "UpdateBinRecordRequest": {
+      "description": "Partial update — every field optional. Omitting a field leaves it unchanged.",
+      "fields": {
+        "issuer": { "type": "string | omitted", "rule": "if present, non-blank" },
+        "cardProgramGroupName": { "type": "string | omitted", "rule": "if present, non-blank" },
+        "binIin": { "type": "string | omitted", "rule": "if present, exactly 6 digits" },
+        "merchantPrefix": { "type": "string | omitted", "rule": "if present, exactly 3 digits" },
+        "merchantId": { "type": "integer | omitted", "rule": "if present, must reference an existing merchant" },
+        "instanceName": {
+          "type": "string | omitted",
+          "rule": "omit = leave unchanged; explicit null is REJECTED (422 BIN_INSTANCE_NAME_REQUIRED); empty/whitespace REJECTED (422 VALIDATION_ERROR); if this update changes ANY field and the record has no instanceName yet, one must be supplied in this same request"
+        }
+      }
+    },
+    "DeleteBinRecordResponse": {
+      "fields": {
+        "id": { "type": "integer" },
+        "deleted": { "type": "boolean", "value": "always true on success" }
+      }
+    },
+    "PaginatedResponse<BinRecordResponse>": {
+      "fields": {
+        "items": { "type": "array of BinRecordResponse" },
+        "total": { "type": "integer" },
+        "page": { "type": "integer" },
+        "pageSize": { "type": "integer" }
+      }
+    }
+  },
+  "endpoints": [
+    {
+      "name": "List BIN records",
+      "method": "GET",
+      "path": "/api/v1/bin-series",
+      "auth": "required",
+      "queryParams": {
+        "page": { "type": "integer", "default": 1, "min": 1 },
+        "pageSize": { "type": "integer", "default": 50, "min": 1, "max": 200 },
+        "search": { "type": "string", "optional": true, "description": "Substring match across issuer, cardProgramGroupName, binIin, merchantPrefix" },
+        "issuer": { "type": "string", "optional": true, "description": "Exact, case-insensitive issuer filter" },
+        "cardProgramGroupName": { "type": "string", "optional": true, "description": "Exact, case-insensitive filter" },
+        "sortBy": { "type": "string", "optional": true, "enum": ["issuer", "cardProgramGroupName", "binIin", "merchantPrefix", "id"], "default": "id" },
+        "sortOrder": { "type": "string", "enum": ["asc", "desc"], "default": "asc" }
+      },
+      "requestBody": null,
+      "successResponse": {
+        "httpStatus": 200,
+        "schema": "PaginatedResponse<BinRecordResponse>",
+        "example": {
+          "items": [
+            {
+              "id": 1,
+              "issuer": "HDFC Bank",
+              "cardProgramGroupName": "HDFC Regalia",
+              "binIin": "401288",
+              "merchantPrefix": "001",
+              "merchantId": 12,
+              "instanceName": null,
+              "updatedBy": null,
+              "updatedAt": "2026-09-16T22:10:05.705688+00:00"
+            }
+          ],
+          "total": 611,
+          "page": 1,
+          "pageSize": 50
+        }
+      },
+      "errorResponses": [
+        { "httpStatus": 422, "code": "VALIDATION_ERROR", "when": "invalid page/pageSize/sortBy value" },
+        { "httpStatus": 401, "code": "AUTH_MISSING_CREDENTIALS", "when": "no/bad Authorization header" }
+      ]
+    },
+    {
+      "name": "Resolve one BIN record",
+      "method": "GET",
+      "path": "/api/v1/bin-series/resolve",
+      "auth": "required",
+      "queryParams": {
+        "binIin": { "type": "string", "required": true, "format": "exactly 6 digits" },
+        "merchantPrefix": { "type": "string", "required": true, "format": "exactly 3 digits" }
+      },
+      "requestBody": null,
+      "description": "Exact (binIin, merchantPrefix) lookup only. Never returns a partial match.",
+      "successResponse": {
+        "httpStatus": 200,
+        "schema": "BinRecordResponse",
+        "example": {
+          "id": 1,
+          "issuer": "HDFC Bank",
+          "cardProgramGroupName": "HDFC Regalia",
+          "binIin": "401288",
+          "merchantPrefix": "001",
+          "merchantId": 12,
+          "instanceName": null,
+          "updatedBy": null,
+          "updatedAt": "2026-09-16T22:10:05.705688+00:00"
+        }
+      },
+      "errorResponses": [
+        { "httpStatus": 422, "code": "VALIDATION_ERROR", "when": "binIin/merchantPrefix missing or wrong format" },
+        { "httpStatus": 404, "code": "BIN_RECORD_NOT_FOUND", "when": "no record matches the exact pair" },
+        { "httpStatus": 401, "code": "AUTH_MISSING_CREDENTIALS", "when": "no/bad Authorization header" }
+      ]
+    },
+    {
+      "name": "Create BIN record",
+      "method": "POST",
+      "path": "/api/v1/bin-series",
+      "auth": "required",
+      "requestBody": {
+        "schema": "CreateBinRecordRequest",
+        "example": {
+          "issuer": "Aurora Retail",
+          "cardProgramGroupName": "Aurora Elite",
+          "binIin": "401288",
+          "merchantPrefix": "001",
+          "merchantId": 12,
+          "instanceName": "North Zone"
+        },
+        "minimalExample": {
+          "issuer": "Aurora Retail",
+          "cardProgramGroupName": "Aurora Elite",
+          "binIin": "401288",
+          "merchantPrefix": "001",
+          "instanceName": "North Zone"
+        }
+      },
+      "successResponse": {
+        "httpStatus": 201,
+        "schema": "BinRecordResponse",
+        "example": {
+          "id": 612,
+          "issuer": "Aurora Retail",
+          "cardProgramGroupName": "Aurora Elite",
+          "binIin": "401288",
+          "merchantPrefix": "001",
+          "merchantId": 12,
+          "instanceName": "North Zone",
+          "updatedBy": "Jane Doe",
+          "updatedAt": "2026-09-22T10:15:00+00:00"
+        }
+      },
+      "errorResponses": [
+        { "httpStatus": 422, "code": "VALIDATION_ERROR", "when": "missing/blank issuer, cardProgramGroupName, or instanceName; malformed binIin/merchantPrefix" },
+        { "httpStatus": 422, "code": "BIN_MERCHANT_NOT_FOUND", "when": "merchantId supplied but does not exist" },
+        { "httpStatus": 409, "code": "BIN_RECORD_ALREADY_EXISTS", "when": "(binIin, merchantPrefix) already exists" },
+        { "httpStatus": 401, "code": "AUTH_MISSING_CREDENTIALS", "when": "no/bad Authorization header" }
+      ],
+      "audit": "Creates a revision: action=create, entityType=bin_record. Actor is always the authenticated caller, never client-supplied."
+    },
+    {
+      "name": "Update BIN record",
+      "method": "PUT",
+      "path": "/api/v1/bin-series/{binRecordId}",
+      "auth": "required",
+      "pathParams": {
+        "binRecordId": { "type": "integer", "min": 1 }
+      },
+      "requestBody": {
+        "schema": "UpdateBinRecordRequest",
+        "description": "Partial update — send only the fields you want to change.",
+        "example": {
+          "issuer": "Aurora Retail Ltd",
+          "instanceName": "South Zone"
+        },
+        "singleFieldExample": {
+          "cardProgramGroupName": "Aurora Elite Plus"
+        }
+      },
+      "successResponse": {
+        "httpStatus": 200,
+        "schema": "BinRecordResponse",
+        "example": {
+          "id": 612,
+          "issuer": "Aurora Retail Ltd",
+          "cardProgramGroupName": "Aurora Elite",
+          "binIin": "401288",
+          "merchantPrefix": "001",
+          "merchantId": 12,
+          "instanceName": "South Zone",
+          "updatedBy": "Jane Doe",
+          "updatedAt": "2026-09-22T11:00:00+00:00"
+        }
+      },
+      "errorResponses": [
+        { "httpStatus": 404, "code": "BIN_RECORD_NOT_FOUND", "when": "binRecordId does not exist" },
+        { "httpStatus": 422, "code": "VALIDATION_ERROR", "when": "malformed binIin/merchantPrefix, or instanceName sent as empty/whitespace" },
+        { "httpStatus": 422, "code": "BIN_MERCHANT_NOT_FOUND", "when": "merchantId supplied but does not exist" },
+        { "httpStatus": 422, "code": "BIN_INSTANCE_NAME_REQUIRED", "when": "instanceName sent as explicit null, OR this update changes something while the record still has no instanceName" },
+        { "httpStatus": 409, "code": "BIN_RECORD_ALREADY_EXISTS", "when": "changing binIin/merchantPrefix would collide with another record" },
+        { "httpStatus": 401, "code": "AUTH_MISSING_CREDENTIALS", "when": "no/bad Authorization header" }
+      ],
+      "notes": [
+        "A request that changes nothing (resends identical values) is a no-op: 200 OK, no audit revision created, updatedBy/updatedAt untouched.",
+        "instanceName can be omitted if the record already has one and you're only changing other fields.",
+        "instanceName cannot be omitted if the record currently has none AND you are changing any other field in this same request — must be supplied together."
+      ],
+      "audit": "Creates a revision only if something actually changed: action=update, entityType=bin_record, change description lists every changed field (e.g. 'Issuer changed from X to Y; instance name changed from A to B'). Actor is always the authenticated caller."
+    },
+    {
+      "name": "Delete BIN record",
+      "method": "DELETE",
+      "path": "/api/v1/bin-series/{binRecordId}",
+      "auth": "required",
+      "pathParams": {
+        "binRecordId": { "type": "integer", "min": 1 }
+      },
+      "requestBody": null,
+      "successResponse": {
+        "httpStatus": 200,
+        "schema": "DeleteBinRecordResponse",
+        "example": { "id": 612, "deleted": true }
+      },
+      "errorResponses": [
+        { "httpStatus": 404, "code": "BIN_RECORD_NOT_FOUND", "when": "binRecordId does not exist" },
+        { "httpStatus": 401, "code": "AUTH_MISSING_CREDENTIALS", "when": "no/bad Authorization header" }
+      ],
+      "audit": "Creates a revision: action=delete, entityType=bin_record, entityId=the deleted record's former id (soft reference, not a FK — survives the record's deletion). Actor is always the authenticated caller."
+    }
+  ],
+  "notImplemented": {
+    "description": "Explicitly out of scope so far — do not assume these exist.",
+    "items": [
+      "Bulk BIN import/upsert (no endpoint)",
+      "Bulk single-column update (no endpoint)",
+      "Batch/multi-card resolve (no endpoint)",
+      "Dynamic/custom columns on BIN records",
+      "SOP write APIs of any kind (SOP is currently read-only: GET sheet detail, GET sheet rows, GET common escalation)"
+    ]
+  },
+  "openQuestionsForProduct": [
+    "Should 'issuer' be renamed to 'issuerName'? No field called 'merchantName' was found in the BIN domain to rename — 'issuer' already serves that role and matches the frontend's own field name.",
+    "Confirm the instanceName-mandatory-on-update interpretation: a real write must leave the record with a non-blank instanceName, but omitting it is fine if the record already has one.",
+    "What should instanceName actually reference long-term (currently a free-text string, no backend 'instances' table exists)?"
+  ]
+}
