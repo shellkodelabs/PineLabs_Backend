@@ -21,11 +21,17 @@ Index usage:
     concatenation) partially accelerates this; the user name/email
     predicates aren't covered by any revisions-side index, but at the
     current data volume (10 seeded rows) this is a non-issue.
+
+Version History task: `list_for_entity_types`/`count_for_entity_types`
+back GET /api/v1/bin-series/version-history (renamed from /history by
+the API Naming task) — an entity_type-scoped query
+(`ix_revisions_entity_type` covers the `IN` filter) ordered by the same
+`ix_revisions_occurred_at` index `search()`'s default sort already uses.
 """
-from typing import Optional, Sequence, Tuple
+from typing import List, Optional, Sequence, Tuple
 
 from sqlalchemy import Row, asc, desc, func, or_, select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 
 from app.models.revision import Revision
 from app.models.user import User
@@ -107,3 +113,33 @@ def search(
     rows = session.execute(stmt).all()
 
     return rows, total or 0
+
+
+def list_for_entity_types(session: Session, *, entity_types: Sequence[str], limit: int) -> List[Revision]:
+    """Backs GET /api/v1/bin-series/version-history (Version History
+    task): newest-first (occurred_at DESC, id DESC tiebreaker — same tiebreaker
+    convention as `search()` above) revisions whose entity_type is one
+    of `entity_types` (bin_record, bin_custom_column). Returns full ORM
+    `Revision` objects (unlike `search()`'s flattened Row tuples) because
+    the caller needs `metadata_` — the before/after snapshot JSONB —
+    which `search()`'s column-list SELECT deliberately omits (the
+    generic revisions list has no use for it). `joinedload(Revision.user)`
+    is a LEFT OUTER JOIN, avoiding one extra query per entry to resolve
+    each entry's actor name."""
+    stmt = (
+        select(Revision)
+        .options(joinedload(Revision.user))
+        .where(Revision.entity_type.in_(entity_types))
+        .order_by(Revision.occurred_at.desc(), Revision.id.desc())
+        .limit(limit)
+    )
+    return list(session.execute(stmt).scalars().all())
+
+
+def count_for_entity_types(session: Session, *, entity_types: Sequence[str]) -> int:
+    """Total matching revisions regardless of `limit` — informational
+    only (there is no true pagination here, see
+    app/services/bin_series_history_service.py's module docstring for
+    why)."""
+    stmt = select(func.count()).select_from(Revision).where(Revision.entity_type.in_(entity_types))
+    return session.scalar(stmt) or 0

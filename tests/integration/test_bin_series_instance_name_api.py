@@ -70,35 +70,35 @@ BASE_PAYLOAD = {
 
 def test_create_without_instance_name_rejected(api_client, act_as, actor):
     act_as(actor)
-    resp = api_client.post("/api/v1/bin-series", json=BASE_PAYLOAD)  # instanceName key entirely absent
+    resp = api_client.post("/api/v1/bin-series/create", json=BASE_PAYLOAD)  # instanceName key entirely absent
     assert resp.status_code == 422
     assert resp.json()["error"]["code"] == "VALIDATION_ERROR"
 
 
 def test_create_with_null_instance_name_rejected(api_client, act_as, actor):
     act_as(actor)
-    resp = api_client.post("/api/v1/bin-series", json={**BASE_PAYLOAD, "instanceName": None})
+    resp = api_client.post("/api/v1/bin-series/create", json={**BASE_PAYLOAD, "instanceName": None})
     assert resp.status_code == 422
     assert resp.json()["error"]["code"] == "VALIDATION_ERROR"
 
 
 def test_create_with_empty_instance_name_rejected(api_client, act_as, actor):
     act_as(actor)
-    resp = api_client.post("/api/v1/bin-series", json={**BASE_PAYLOAD, "instanceName": ""})
+    resp = api_client.post("/api/v1/bin-series/create", json={**BASE_PAYLOAD, "instanceName": ""})
     assert resp.status_code == 422
     assert resp.json()["error"]["code"] == "VALIDATION_ERROR"
 
 
 def test_create_with_whitespace_instance_name_rejected(api_client, act_as, actor):
     act_as(actor)
-    resp = api_client.post("/api/v1/bin-series", json={**BASE_PAYLOAD, "instanceName": "   "})
+    resp = api_client.post("/api/v1/bin-series/create", json={**BASE_PAYLOAD, "instanceName": "   "})
     assert resp.status_code == 422
     assert resp.json()["error"]["code"] == "VALIDATION_ERROR"
 
 
 def test_create_with_valid_instance_name_succeeds(api_client, db_session, act_as, actor):
     act_as(actor)
-    resp = api_client.post("/api/v1/bin-series", json={**BASE_PAYLOAD, "instanceName": "North Zone"})
+    resp = api_client.post("/api/v1/bin-series/create", json={**BASE_PAYLOAD, "instanceName": "North Zone"})
     assert resp.status_code == 201
     body = resp.json()
     assert body["instanceName"] == "North Zone"
@@ -110,7 +110,7 @@ def test_create_with_valid_instance_name_succeeds(api_client, db_session, act_as
 def test_create_instance_name_is_trimmed(api_client, act_as, actor):
     act_as(actor)
     resp = api_client.post(
-        "/api/v1/bin-series",
+        "/api/v1/bin-series/create",
         json={**BASE_PAYLOAD, "binIin": "999601", "instanceName": "  South Zone  "},
     )
     assert resp.status_code == 201
@@ -120,7 +120,7 @@ def test_create_instance_name_is_trimmed(api_client, act_as, actor):
 def test_create_instance_name_included_in_audit_metadata(api_client, db_session, act_as, actor):
     act_as(actor)
     resp = api_client.post(
-        "/api/v1/bin-series",
+        "/api/v1/bin-series/create",
         json={**BASE_PAYLOAD, "binIin": "999602", "instanceName": "East Zone"},
     )
     new_id = resp.json()["id"]
@@ -136,7 +136,7 @@ def test_create_instance_name_included_in_audit_metadata(api_client, db_session,
 def test_update_explicit_null_instance_name_rejected(api_client, db_session, act_as, actor):
     record = _make_bin(db_session, issuer="Test Bin Instance U1", bin_iin="999610", merchant_prefix="001", instance_name="West Zone")
     act_as(actor)
-    resp = api_client.put(f"/api/v1/bin-series/{record.id}", json={"instanceName": None})
+    resp = api_client.put(f"/api/v1/bin-series/{record.id}/update", json={"instanceName": None})
     assert resp.status_code == 422
     assert resp.json()["error"]["code"] == "BIN_INSTANCE_NAME_REQUIRED"
 
@@ -144,7 +144,7 @@ def test_update_explicit_null_instance_name_rejected(api_client, db_session, act
 def test_update_empty_instance_name_rejected(api_client, db_session, act_as, actor):
     record = _make_bin(db_session, issuer="Test Bin Instance U2", bin_iin="999611", merchant_prefix="001", instance_name="West Zone")
     act_as(actor)
-    resp = api_client.put(f"/api/v1/bin-series/{record.id}", json={"instanceName": ""})
+    resp = api_client.put(f"/api/v1/bin-series/{record.id}/update", json={"instanceName": ""})
     assert resp.status_code == 422
     assert resp.json()["error"]["code"] == "VALIDATION_ERROR"
 
@@ -152,7 +152,7 @@ def test_update_empty_instance_name_rejected(api_client, db_session, act_as, act
 def test_update_whitespace_instance_name_rejected(api_client, db_session, act_as, actor):
     record = _make_bin(db_session, issuer="Test Bin Instance U3", bin_iin="999612", merchant_prefix="001", instance_name="West Zone")
     act_as(actor)
-    resp = api_client.put(f"/api/v1/bin-series/{record.id}", json={"instanceName": "   "})
+    resp = api_client.put(f"/api/v1/bin-series/{record.id}/update", json={"instanceName": "   "})
     assert resp.status_code == 422
     assert resp.json()["error"]["code"] == "VALIDATION_ERROR"
 
@@ -160,7 +160,7 @@ def test_update_whitespace_instance_name_rejected(api_client, db_session, act_as
 def test_update_with_valid_instance_name_succeeds(api_client, db_session, act_as, actor):
     record = _make_bin(db_session, issuer="Test Bin Instance U4", bin_iin="999613", merchant_prefix="001", instance_name="West Zone")
     act_as(actor)
-    resp = api_client.put(f"/api/v1/bin-series/{record.id}", json={"instanceName": "Central Zone"})
+    resp = api_client.put(f"/api/v1/bin-series/{record.id}/update", json={"instanceName": "Central Zone"})
     assert resp.status_code == 200
     assert resp.json()["instanceName"] == "Central Zone"
 
@@ -171,7 +171,7 @@ def test_update_omitting_instance_name_on_record_that_already_has_one_succeeds(a
     an unrelated field."""
     record = _make_bin(db_session, issuer="Test Bin Instance U5", bin_iin="999614", merchant_prefix="001", instance_name="West Zone")
     act_as(actor)
-    resp = api_client.put(f"/api/v1/bin-series/{record.id}", json={"issuer": "Test Bin Instance U5 Renamed"})
+    resp = api_client.put(f"/api/v1/bin-series/{record.id}/update", json={"issuer": "Test Bin Instance U5 Renamed"})
     assert resp.status_code == 200
     body = resp.json()
     assert body["issuer"] == "Test Bin Instance U5 Renamed"
@@ -186,13 +186,13 @@ def test_update_legacy_record_without_instance_name_requires_it_to_change_other_
     record = _make_bin(db_session, issuer="Test Bin Instance Legacy", bin_iin="999615", merchant_prefix="001", instance_name=None)
     act_as(actor)
 
-    missing = api_client.put(f"/api/v1/bin-series/{record.id}", json={"issuer": "Test Bin Instance Legacy Renamed"})
+    missing = api_client.put(f"/api/v1/bin-series/{record.id}/update", json={"issuer": "Test Bin Instance Legacy Renamed"})
     assert missing.status_code == 422
     assert missing.json()["error"]["code"] == "BIN_INSTANCE_NAME_REQUIRED"
 
     # Supplying instanceName alongside the other change fixes it.
     ok = api_client.put(
-        f"/api/v1/bin-series/{record.id}",
+        f"/api/v1/bin-series/{record.id}/update",
         json={"issuer": "Test Bin Instance Legacy Renamed", "instanceName": "Pilot Program"},
     )
     assert ok.status_code == 200
@@ -207,7 +207,7 @@ def test_update_legacy_record_pure_noop_is_exempt(api_client, db_session, act_as
     to backfill instanceName just because the endpoint was called."""
     record = _make_bin(db_session, issuer="Test Bin Instance NoopLegacy", bin_iin="999616", merchant_prefix="001", instance_name=None)
     act_as(actor)
-    resp = api_client.put(f"/api/v1/bin-series/{record.id}", json={"issuer": "Test Bin Instance NoopLegacy"})
+    resp = api_client.put(f"/api/v1/bin-series/{record.id}/update", json={"issuer": "Test Bin Instance NoopLegacy"})
     assert resp.status_code == 200
     assert resp.json()["instanceName"] is None
 
@@ -215,7 +215,7 @@ def test_update_legacy_record_pure_noop_is_exempt(api_client, db_session, act_as
 def test_update_instance_name_change_recorded_in_audit_description(api_client, db_session, act_as, actor):
     record = _make_bin(db_session, issuer="Test Bin Instance U6", bin_iin="999617", merchant_prefix="001", instance_name="West Zone")
     act_as(actor)
-    resp = api_client.put(f"/api/v1/bin-series/{record.id}", json={"instanceName": "Priority Tier"})
+    resp = api_client.put(f"/api/v1/bin-series/{record.id}/update", json={"instanceName": "Priority Tier"})
     assert resp.status_code == 200
 
     [revision] = _revisions_for(db_session, record.id)
@@ -234,13 +234,13 @@ def test_regression_existing_seeded_records_have_null_instance_name(api_client, 
     total = db_session.scalar(select(func.count()).select_from(BinRecord))
     assert total >= 611
 
-    resp = api_client.get("/api/v1/bin-series", params={"page": 1, "pageSize": 1})
+    resp = api_client.get("/api/v1/bin-series/list", params={"page": 1, "pageSize": 1})
     assert resp.status_code == 200
     assert "instanceName" in resp.json()["items"][0]
 
 
 def test_regression_resolve_still_works_without_instance_name(api_client, db_session):
     _make_bin(db_session, issuer="Test Bin Instance Resolve", bin_iin="999618", merchant_prefix="001", instance_name=None)
-    resp = api_client.get("/api/v1/bin-series/resolve", params={"binIin": "999618", "merchantPrefix": "001"})
+    resp = api_client.get("/api/v1/bin-series/lookup", params={"binIin": "999618", "merchantPrefix": "001"})
     assert resp.status_code == 200
     assert resp.json()["instanceName"] is None

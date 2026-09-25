@@ -8,6 +8,16 @@ reference — and PostgreSQL has no native polymorphic FK. Validating that
 entity_id actually points at a real row of the given entity_type is a
 service-layer concern (added in a later part), not a database constraint.
 No five separate entity-specific FK columns either, per the design.
+
+`bin_custom_column` (Dynamic/Custom Columns task) added to
+ENTITY_TYPE_VALUES: a column create/rename is a metadata-level event
+about the COLUMN itself, not about any specific bin_record row, so it
+genuinely doesn't fit under the existing "bin_record" entity_type (which
+always means a specific row). Row-level custom-FIELD-VALUE changes
+(editing a custom cell) remain ordinary "bin_record" updates — only
+column create/rename get this new entity_type. Requires a migration
+(the CHECK constraint must be dropped and recreated with the expanded
+value list — Postgres has no ALTER CHECK).
 """
 from datetime import datetime
 from typing import Optional
@@ -30,7 +40,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.core.database import Base
 
 ACTION_TYPE_VALUES = ("create", "update", "delete", "upload")
-ENTITY_TYPE_VALUES = ("bin_record", "merchant", "sop_sheet", "sop_row", "user")
+ENTITY_TYPE_VALUES = ("bin_record", "merchant", "sop_sheet", "sop_row", "user", "bin_custom_column")
 
 _action_type_check_sql = "action_type IN ({})".format(", ".join(f"'{value}'" for value in ACTION_TYPE_VALUES))
 _entity_type_check_sql = "entity_type IN ({})".format(", ".join(f"'{value}'" for value in ENTITY_TYPE_VALUES))

@@ -30,6 +30,17 @@ real write would leave the record without one — see that module's
 docstring for the exact rule. This split (nullable schema + mandatory
 application rule) is deliberate: a NOT NULL constraint here would break
 every existing row with no real instance data to backfill from.
+
+`custom_fields` (Dynamic/Custom Columns task): JSONB, NOT NULL DEFAULT
+'{}'. Holds Bin Series dynamic-column VALUES for this row, keyed by
+`bin_custom_columns.key` (see app/models/bin_custom_column.py — that
+table is the metadata registry; this column is only the per-row values).
+Values are always plain strings, matching the frontend's own model (no
+type system, no nested structures — BinTable.jsx's EditableCell only
+ever commits a trimmed string). NOT NULL with a '{}' default (unlike
+instance_name's NULL-based backward-compatibility split above) because
+an empty JSON object is a completely natural "no custom values yet"
+representation that needs no special-casing anywhere it's read.
 """
 from datetime import datetime
 from typing import Optional
@@ -45,7 +56,9 @@ from sqlalchemy import (
     String,
     UniqueConstraint,
     func,
+    text,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
@@ -81,6 +94,9 @@ class BinRecord(Base):
     # table exists). Nullable at the DB level; mandatory-ness is an
     # application-layer rule enforced in app/services/bin_service.py.
     instance_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+
+    # See module docstring — Dynamic/Custom Columns task.
+    custom_fields: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
 
     # See module docstring. No back_populates — User has no need for a
     # reverse "bin records I last touched" collection (same one-directional

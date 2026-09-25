@@ -1,7 +1,7 @@
 {
   "title": "Pine Labs Helpdesk — BIN Series API Contract",
-  "version": "Part 17",
-  "lastUpdated": "2026-09-22",
+  "version": "Bin Series priority task — bulk upload + stats + resolve-batch + search/filter + dynamic/custom columns + export + version history + API naming/route rename",
+  "lastUpdated": "2026-09-24",
   "baseUrl": "/api/v1/bin-series",
   "authentication": {
     "type": "Bearer token",
@@ -27,11 +27,17 @@
     { "code": "BIN_RECORD_NOT_FOUND", "httpStatus": 404, "meaning": "No BIN record exists for the given id / (binIin, merchantPrefix) pair." },
     { "code": "BIN_RECORD_ALREADY_EXISTS", "httpStatus": 409, "meaning": "A BIN record already exists with this exact (binIin, merchantPrefix)." },
     { "code": "BIN_MERCHANT_NOT_FOUND", "httpStatus": 422, "meaning": "merchantId was supplied but does not reference an existing merchant." },
-    { "code": "BIN_INSTANCE_NAME_REQUIRED", "httpStatus": 422, "meaning": "On update: instanceName was explicitly sent as null, or the update would leave the record without one." }
+    { "code": "BIN_INSTANCE_NAME_REQUIRED", "httpStatus": 422, "meaning": "On update: instanceName was explicitly sent as null, or the update would leave the record without one." },
+    { "code": "BIN_CUSTOM_COLUMN_NOT_FOUND", "httpStatus": 422, "meaning": "A customFields key on create/update, or a columnId on PATCH /custom-columns/{columnId}/rename, does not reference an existing custom column. (422 on create/update since it's a request-body validation problem; 404 on PATCH /custom-columns/{columnId}/rename since the id is a path parameter identifying a specific resource.)" },
+    { "code": "BIN_CUSTOM_COLUMN_ALREADY_EXISTS", "httpStatus": 409, "meaning": "POST /custom-columns/create or PATCH /custom-columns/{columnId}/rename would result in a custom column name that already exists (case-insensitive)." }
   ],
+  "notes": {
+    "bulkUploadPerRowOutcomes": "POST /bulk-upload never fails the whole batch for one bad row — see that endpoint's own errorResponses/notes for its per-row failedRows/skippedRows model instead of request-level error codes.",
+    "apiNamingTask": "Every Bin Series route path was renamed once (API Naming task) so its purpose reads directly from the URL — see each endpoint's own `renamedFrom` field for its prior path. This was a pure URL rename: no request/response schema, business logic, database behavior, or authentication changed. `/export` and `/bulk-upload` were kept as-is (already self-explanatory)."
+  },
   "schemas": {
     "BinRecordResponse": {
-      "description": "Returned by list, resolve, create, and update.",
+      "description": "Returned by list, lookup, create, and update.",
       "fields": {
         "id": { "type": "integer" },
         "issuer": { "type": "string" },
@@ -40,6 +46,7 @@
         "merchantPrefix": { "type": "string", "format": "exactly 3 digits" },
         "merchantId": { "type": "integer | null", "note": "Soft link to the merchants table (SOP/classification domain). Not a business-name field." },
         "instanceName": { "type": "string | null", "note": "Null for legacy records created before this field existed (all 611 originally seeded records)." },
+        "customFields": { "type": "object (string -> string)", "note": "ALWAYS present, ALWAYS an object (never null) — default {}. Keyed by each custom column's immutable `key` (see CustomColumnResponse), never by its display `name`. Every currently-registered custom column that has never been given a value for this row is still present here as an empty string, since POST /bin-series/custom-columns/create backfills every existing row at creation time." },
         "updatedBy": { "type": "string | null", "note": "Name of the user who last created/updated this record via the write APIs. Null if never touched by them (e.g. seeded data)." },
         "updatedAt": { "type": "string | null", "format": "ISO-8601 timestamp" }
       }
@@ -51,7 +58,8 @@
         "binIin": { "type": "string", "required": true, "rule": "exactly 6 digits" },
         "merchantPrefix": { "type": "string", "required": true, "rule": "exactly 3 digits" },
         "merchantId": { "type": "integer | null", "required": false, "rule": "if supplied, must reference an existing merchant" },
-        "instanceName": { "type": "string", "required": true, "rule": "must not be missing, null, empty, or whitespace-only; trimmed server-side" }
+        "instanceName": { "type": "string", "required": true, "rule": "must not be missing, null, empty, or whitespace-only; trimmed server-side" },
+        "customFields": { "type": "object (string -> string) | omitted", "required": false, "rule": "every key MUST reference an existing custom column's `key` (422 BIN_CUSTOM_COLUMN_NOT_FOUND otherwise); omit entirely for a row with no custom values yet" }
       }
     },
     "UpdateBinRecordRequest": {
@@ -65,6 +73,10 @@
         "instanceName": {
           "type": "string | omitted",
           "rule": "omit = leave unchanged; explicit null is REJECTED (422 BIN_INSTANCE_NAME_REQUIRED); empty/whitespace REJECTED (422 VALIDATION_ERROR); if this update changes ANY field and the record has no instanceName yet, one must be supplied in this same request"
+        },
+        "customFields": {
+          "type": "object (string -> string) | omitted",
+          "rule": "MERGES into the existing customFields — only the keys you include change, every other existing key is left untouched. Every key MUST reference an existing custom column's `key` (422 BIN_CUSTOM_COLUMN_NOT_FOUND otherwise). An empty string is a valid value (a deliberate 'cleared' state) — there is no way to remove a key entirely, matching the frontend's own EditableCell, which never sends anything but a trimmed string."
         }
       }
     },
@@ -74,6 +86,50 @@
         "deleted": { "type": "boolean", "value": "always true on success" }
       }
     },
+    "BulkUploadRequest": {
+      "description": "Backs the frontend's BinTable \"Import Data\" upload flow (UploadSheetModal.jsx) — mode maps to that modal's two tabs. JSON body, not multipart: the frontend already parses CSV/XLSX into row objects client-side (utils/csv.js) before any call to this endpoint would happen.",
+      "fields": {
+        "mode": { "type": "string", "required": true, "enum": ["addNew", "updateExisting"] },
+        "instanceName": {
+          "type": "string",
+          "required": true,
+          "rule": "must not be missing, null, empty, or whitespace-only",
+          "note": "Applied to every row created in addNew mode. In updateExisting mode, only backfilled onto matched rows that don't already have an instanceName — never overwrites an existing value. NOT collected by the current UploadSheetModal.jsx — see openQuestionsForProduct."
+        },
+        "rows": { "type": "array of BulkUploadRow", "required": true, "minItems": 1, "maxItems": 1000 }
+      }
+    },
+    "BulkUploadRow": {
+      "description": "All fields optional at the schema level — which ones are actually required depends on `mode` and the matching strategy (validated per-row in the service, not rejected at the request level).",
+      "fields": {
+        "issuer": { "type": "string | omitted", "note": "addNew: required, non-blank. updateExisting: used as the fallback match key when binIin/merchantPrefix are absent (only if it resolves to exactly one existing record); if present and non-blank it also overwrites the target's issuer once matched." },
+        "cardProgramGroupName": { "type": "string | omitted", "note": "addNew: required, non-blank. updateExisting: blank/omitted = leave unchanged." },
+        "binIin": { "type": "string | omitted", "note": "addNew: required, exactly 6 digits. updateExisting: PRIMARY match key (with merchantPrefix) when both are present — never itself updated." },
+        "merchantPrefix": { "type": "string | omitted", "note": "addNew: required, exactly 3 digits. updateExisting: other half of the PRIMARY match key — never itself updated." },
+        "merchantId": { "type": "integer | omitted", "note": "If present, must reference an existing merchant." }
+      }
+    },
+    "BulkUploadRowNote": {
+      "description": "One entry in failedRows or skippedRows.",
+      "fields": {
+        "rowIndex": { "type": "integer", "note": "0-indexed position in the submitted rows array." },
+        "binIin": { "type": "string | null" },
+        "merchantPrefix": { "type": "string | null" },
+        "reason": { "type": "string" }
+      }
+    },
+    "BulkUploadResponse": {
+      "fields": {
+        "mode": { "type": "string" },
+        "totalRows": { "type": "integer" },
+        "createdCount": { "type": "integer" },
+        "updatedCount": { "type": "integer" },
+        "skippedCount": { "type": "integer" },
+        "failedCount": { "type": "integer" },
+        "failedRows": { "type": "array of BulkUploadRowNote" },
+        "skippedRows": { "type": "array of BulkUploadRowNote" }
+      }
+    },
     "PaginatedResponse<BinRecordResponse>": {
       "fields": {
         "items": { "type": "array of BinRecordResponse" },
@@ -81,21 +137,109 @@
         "page": { "type": "integer" },
         "pageSize": { "type": "integer" }
       }
+    },
+    "BinSeriesStatsResponse": {
+      "description": "Backs the frontend's StatCards on the BIN Series page (src/components/dashboard/StatCards.jsx) — today computed client-side from the full local mock array.",
+      "fields": {
+        "totalRecords": { "type": "integer", "note": "COUNT(*) over the whole bin_records table — not paginated/filtered." },
+        "totalIssuers": { "type": "integer", "note": "COUNT(DISTINCT issuer)." },
+        "totalCardPrograms": { "type": "integer", "note": "COUNT(DISTINCT cardProgramGroupName)." }
+      }
+    },
+    "ResolveBatchRequest": {
+      "description": "Backs BulkLookupModal.jsx (opened from both BinResolver.jsx and BinTable.jsx).",
+      "fields": {
+        "cards": { "type": "array of string", "required": true, "minItems": 1, "maxItems": 1000, "note": "Raw card number strings in any format — non-digit characters (spaces, hyphens, etc.) are stripped before matching. Empty/blank/too-short strings are valid entries — they simply resolve to matched:false, never rejected individually." }
+      }
+    },
+    "ResolveBatchResultItem": {
+      "description": "One entry per input card, same order, duplicates preserved — never dropped, never merged.",
+      "fields": {
+        "input": { "type": "string", "note": "The raw, TRIMMED original input string, verbatim — never reformatted. (The frontend's own local resolve() reformats successfully-parsed cards as \"{bin} {prefix}\"; this API deliberately returns the literal input instead, for an unambiguous contract — the frontend can still reformat it for display however it likes.)" },
+        "binIin": { "type": "string | null", "note": "The 6-digit BIN extracted from input, if at least 6 digits were present — set regardless of match outcome." },
+        "merchantPrefix": { "type": "string | null", "note": "The 3-digit prefix extracted from input, ONLY if a full 3 digits were present — set regardless of match outcome. A partial (1-2 digit) prefix is never echoed back as if complete." },
+        "issuer": { "type": "string | null", "note": "Null unless matched=true." },
+        "cardProgramGroupName": { "type": "string | null", "note": "Null unless matched=true." },
+        "matched": { "type": "boolean" }
+      }
+    },
+    "ResolveBatchResponse": {
+      "fields": {
+        "results": { "type": "array of ResolveBatchResultItem" }
+      }
+    },
+    "CustomColumnResponse": {
+      "description": "Returned by GET /bin-series/custom-columns, POST .../custom-columns/create, and PATCH .../custom-columns/{id}/rename. Backs BinTable.jsx's column registry (AddColumnModal.jsx / EditableHeader.jsx).",
+      "fields": {
+        "id": { "type": "integer" },
+        "key": { "type": "string", "note": "IMMUTABLE — set once at creation to the column's initial (trimmed, whitespace-collapsed) name, never changes again even if the column is renamed. This is the key every bin_records.customFields entry for this column is stored under." },
+        "name": { "type": "string", "note": "The current display label — the only thing PATCH /custom-columns/{columnId}/rename changes. Unique (case-insensitive) across all custom columns, same as `key` at creation time." },
+        "displayOrder": { "type": "integer", "note": "Creation sequence (1, 2, 3, ...) — matches BinTable.jsx, which always appends a new column after every existing one. There is no reorder capability in the frontend, so this value never changes after creation." },
+        "updatedBy": { "type": "string | null", "note": "Name of the user who created or most recently renamed this column." },
+        "updatedAt": { "type": "string | null", "format": "ISO-8601 timestamp" }
+      }
+    },
+    "CreateCustomColumnRequest": {
+      "fields": {
+        "name": { "type": "string", "required": true, "rule": "non-blank after trim/whitespace-collapse; must not already exist (case-insensitive)" },
+        "defaultValue": { "type": "string | omitted", "required": false, "note": "If supplied, backfilled onto EVERY existing bin_records row as this column's initial value (in the same transaction as the column's creation). If omitted, every existing row gets an empty string for this column instead — matches AddColumnModal.jsx's 'applied to all N existing records at once' behavior exactly." }
+      }
+    },
+    "RenameCustomColumnRequest": {
+      "fields": {
+        "name": { "type": "string", "required": true, "rule": "non-blank after trim/whitespace-collapse; must not already exist on another column (case-insensitive)" }
+      }
+    },
+    "HistoryActor": {
+      "description": "Deliberately just id + name (no email) — BinTable.jsx's Version History UI never displays an email anywhere, unlike the generic GET /api/v1/revisions' fuller user object.",
+      "fields": {
+        "id": { "type": "integer" },
+        "name": { "type": "string" }
+      }
+    },
+    "BinSeriesHistoryEntry": {
+      "description": "One entry in GET /api/v1/bin-series/version-history. ALWAYS carries its full before/after snapshot when one exists — the frontend's click-to-preview (ChangePreviewModal.jsx) re-uses this SAME object, never a second request.",
+      "fields": {
+        "revisionId": { "type": "integer" },
+        "action": { "type": "string", "enum": ["create", "update", "delete", "upload", "column", "rename"], "note": "NOT the raw revisions.action_type (create/update/delete/upload only) — 'column' (a bin_custom_column create) and 'rename' (a bin_custom_column update) are derived from the (entityType, raw action_type) pair, matching the approved frontend's own 6-way local vocabulary exactly (VersionHistoryModal.jsx's actionMeta / ChangePreviewModal.jsx's typeMeta)." },
+        "entityType": { "type": "string", "enum": ["bin_record", "bin_custom_column"] },
+        "entityId": { "type": "integer | null", "note": "The affected BIN record's or custom column's id — a soft reference (not a FK), so it survives the entity's own deletion." },
+        "occurredAt": { "type": "string", "format": "ISO-8601 UTC, 'Z'-suffixed" },
+        "actor": { "type": "HistoryActor | null" },
+        "targetLabel": { "type": "string" },
+        "changeDescription": { "type": "string" },
+        "fieldsChanged": { "type": "object | null", "note": "Present for update/rename/bulk-upload-update entries: { \"<Field Label>\": { \"from\": ..., \"to\": ... } }. Null for create/delete/column-create (nothing to diff)." },
+        "before": { "type": "object | null", "note": "Complete pre-change state, or null if none existed (create) or none was captured (a revision written before this task shipped — NEVER reconstructed from current DB state in that case). Shape matches BinRecordResponse (minus updatedBy/updatedAt) for bin_record entries, or CustomColumnResponse (minus updatedBy/updatedAt) for bin_custom_column entries." },
+        "after": { "type": "object | null", "note": "Complete post-change state, or null if the entity no longer exists (delete) or wasn't captured. Same shape rules as `before`." }
+      }
+    },
+    "BinSeriesHistoryResponse": {
+      "fields": {
+        "items": { "type": "array of BinSeriesHistoryEntry" },
+        "total": { "type": "integer", "note": "Total matching revisions (bin_record + bin_custom_column) regardless of `limit` — informational only, NOT a page count; there is no true pagination on this endpoint (see the endpoint's own notes)." }
+      }
     }
   },
   "endpoints": [
     {
       "name": "List BIN records",
       "method": "GET",
-      "path": "/api/v1/bin-series",
+      "path": "/api/v1/bin-series/list",
+      "renamedFrom": "/api/v1/bin-series (API Naming task)",
       "auth": "required",
+      "description": "Search & Filter task: the approved frontend (BinTable.jsx) has exactly ONE global search box — matching every field on a row, case-insensitive substring — and NO filter dropdowns or column-sort UI at all. This endpoint already covers that (and more, pre-existing from Part 7); the only gap found and fixed was `search` not covering `instanceName`, now added. `issuer`/`cardProgramGroupName` exact filters and `sortBy`/`sortOrder` have no current frontend trigger (no UI control sends them) — kept as-is from Part 7, neither removed nor further extended.",
       "queryParams": {
         "page": { "type": "integer", "default": 1, "min": 1 },
         "pageSize": { "type": "integer", "default": 50, "min": 1, "max": 200 },
-        "search": { "type": "string", "optional": true, "description": "Substring match across issuer, cardProgramGroupName, binIin, merchantPrefix" },
-        "issuer": { "type": "string", "optional": true, "description": "Exact, case-insensitive issuer filter" },
-        "cardProgramGroupName": { "type": "string", "optional": true, "description": "Exact, case-insensitive filter" },
-        "sortBy": { "type": "string", "optional": true, "enum": ["issuer", "cardProgramGroupName", "binIin", "merchantPrefix", "id"], "default": "id" },
+        "search": {
+          "type": "string",
+          "optional": true,
+          "description": "Case-insensitive substring (ILIKE '%term%') match, ORed across issuer, cardProgramGroupName, binIin, merchantPrefix, instanceName, and every customFields VALUE.",
+          "note": "instanceName was added by the Search & Filter task; customFields VALUES (never keys/column names) were added by the Dynamic/Custom Columns task — matches the frontend's own per-row \"search every field\" behavior (Object.values(row), which iterates values only, never object keys). Deliberately does NOT search id/updatedAt (internal/audit fields, never meaningful search targets) or merchantId (frontend rows have no such field)."
+        },
+        "issuer": { "type": "string", "optional": true, "description": "Exact, case-insensitive issuer filter. No current frontend UI triggers this (pre-existing from Part 7)." },
+        "cardProgramGroupName": { "type": "string", "optional": true, "description": "Exact, case-insensitive filter. No current frontend UI triggers this (pre-existing from Part 7)." },
+        "sortBy": { "type": "string", "optional": true, "enum": ["issuer", "cardProgramGroupName", "binIin", "merchantPrefix", "id"], "default": "id", "note": "No current frontend UI triggers this — BinTable.jsx has no column-sort controls at all (pre-existing from Part 7)." },
         "sortOrder": { "type": "string", "enum": ["asc", "desc"], "default": "asc" }
       },
       "requestBody": null,
@@ -112,6 +256,7 @@
               "merchantPrefix": "001",
               "merchantId": 12,
               "instanceName": null,
+              "customFields": { "Region": "North", "Priority": "" },
               "updatedBy": null,
               "updatedAt": "2026-09-16T22:10:05.705688+00:00"
             }
@@ -127,9 +272,136 @@
       ]
     },
     {
+      "name": "Export BIN records (CSV)",
+      "method": "GET",
+      "path": "/api/v1/bin-series/export",
+      "auth": "required",
+      "description": "Backs the frontend's Export button (BinTable.jsx's exportSheet() -> utils/csv.js). CONFIRMED BY INSPECTION: the approved Export button downloads `data` — the FULL local dataset — not the search-box-filtered `rows`, not the current page, and there is no row-selection UI at all (no checkboxes anywhere in BinTable.jsx). This endpoint therefore returns EVERY matching row in one response; there is deliberately no page/pageSize parameter. `search`/`issuer`/`cardProgramGroupName` are accepted for forward integration (identical semantics to, and reusing the same repository filter as, GET /api/v1/bin-series/list) even though today's approved frontend calls Export with none of them — calling this endpoint with no query parameters reproduces the button's current behavior exactly.",
+      "queryParams": {
+        "search": {
+          "type": "string",
+          "optional": true,
+          "description": "Identical semantics to GET /api/v1/bin-series/list's `search` (issuer, cardProgramGroupName, binIin, merchantPrefix, instanceName, and every customFields VALUE)."
+        },
+        "issuer": { "type": "string", "optional": true, "description": "Exact, case-insensitive issuer filter — same as GET /api/v1/bin-series/list." },
+        "cardProgramGroupName": { "type": "string", "optional": true, "description": "Exact, case-insensitive filter — same as GET /api/v1/bin-series/list." }
+      },
+      "requestBody": null,
+      "successResponse": {
+        "httpStatus": 200,
+        "contentType": "text/csv; charset=utf-8",
+        "headers": {
+          "Content-Disposition": "attachment; filename=\"bin-series.csv\""
+        },
+        "description": "A raw CSV document, NOT a JSON envelope. Rows ordered by id ascending (a deterministic default — the frontend's own local array has no meaningful sort order of its own to replicate). Header row is always present, even when zero rows match.",
+        "columns": {
+          "order": "Issuer, Card Program Group Name, BIN / IIN Code, Merchant Prefix, <every custom column in display order, by its current NAME>, Updated By, Updated At",
+          "note": "Exactly BinTable.jsx's own `exportColumns` order — base fields (insertion order from the frontend's row shape), then any custom columns (addColumn() always inserts a new one before the trailing audit pair, never after), then Updated By / Updated At last. `merchantId` and `instanceName` are deliberately NOT included: the frontend's local mock row objects never had those fields, so they never appear in Object.keys(row) and never reach the real exported CSV either — see openQuestionsForProduct."
+        },
+        "headerLabels": {
+          "baseColumns": "FIXED: Issuer, Card Program Group Name, BIN / IIN Code, Merchant Prefix, Updated By, Updated At — matches BinTable.jsx's baseColumnLabels exactly. NOT affected by a client's local base-column rename, since base-column renames are frontend-only and never persisted to the backend (confirmed by the Dynamic/Custom Columns task) — the server has no way to know about a rename it was never told about.",
+          "customColumns": "Each custom column's CURRENT, PERSISTED `name` (from bin_custom_columns, same registry GET /bin-series/custom-columns, POST .../create, and PATCH .../rename use) — a custom-column rename IS a real backend write, so it's correctly reflected on the next export."
+        },
+        "csvFormat": {
+          "delimiter": ",",
+          "rowSeparator": "\\r\\n (CRLF)",
+          "quoting": "RFC4180-style: a value is wrapped in double quotes (with internal quotes doubled) only if it contains a comma, double quote, or newline — matches utils/csv.js's csvEscape exactly (Python's csv module default QUOTE_MINIMAL dialect).",
+          "emptyValues": "Represented as an empty (unquoted) field — never omitted, never null, never a placeholder like 'N/A'.",
+          "encoding": "UTF-8, no byte-order-mark (the frontend's Blob doesn't add one either)."
+        },
+        "exampleCsv": "Issuer,Card Program Group Name,BIN / IIN Code,Merchant Prefix,Region,Updated By,Updated At\r\nAurora Retail,Aurora Elite,401288,001,North,Jane Doe,2026-09-22T10:15:00+00:00\r\n\"Bluewave, Stores\",Bluewave Plus,552461,004,,,\r\n"
+      },
+      "errorResponses": [
+        { "httpStatus": 401, "code": "AUTH_MISSING_CREDENTIALS", "when": "no/bad Authorization header" }
+      ],
+      "audit": "None — read-only, same as GET /api/v1/bin-series/list and GET /lookup. Export was already a pure client-side download with no backend involvement; nothing about adding a server-side endpoint for the same read makes it an auditable write."
+    },
+    {
+      "name": "Bin Series Version History",
+      "method": "GET",
+      "path": "/api/v1/bin-series/version-history",
+      "renamedFrom": "/api/v1/bin-series/history (API Naming task)",
+      "auth": "required",
+      "description": "Backs BinTable.jsx's 'Version History' button (VersionHistoryModal.jsx / ChangePreviewModal.jsx). GLOBAL to the whole Bin Series table, NOT scoped to one record — confirmed by inspection there is no per-row history trigger anywhere in the approved frontend (RowActionsMenu.jsx has no history action at all), just one table-wide button. DISTINCT from the existing generic GET /api/v1/revisions (which covers ALL entity types with no before/after snapshots): this endpoint is scoped to exactly bin_record + bin_custom_column revisions and returns full before/after state for each. Both read the SAME underlying `revisions` table — this is not a second audit system, only a second, richer read of it. There is deliberately NO separate detail/'by id' endpoint: confirmed by inspection that clicking a history entry (ChangePreviewModal.jsx) reads the SAME entry object already in the list, never a second request — so every entry here already carries everything a detail view would need.",
+      "queryParams": {
+        "limit": { "type": "integer", "default": 5, "min": 1, "max": 200, "description": "Max entries to return, newest first. Default 5 matches the frontend's own VersionHistoryModal, which always slices `entries.slice(0, 5)` out of its local changeLog — there is no 'load more' UI, so this is a plain LIMIT, not page/pageSize pagination." }
+      },
+      "requestBody": null,
+      "successResponse": {
+        "httpStatus": 200,
+        "schema": "BinSeriesHistoryResponse",
+        "example": {
+          "items": [
+            {
+              "revisionId": 456,
+              "action": "update",
+              "entityType": "bin_record",
+              "entityId": 612,
+              "occurredAt": "2026-09-24T10:15:00Z",
+              "actor": { "id": 12, "name": "Jane Doe" },
+              "targetLabel": "Aurora Retail — 401288001",
+              "changeDescription": "Issuer changed from Aurora Retail to Aurora Retail Ltd",
+              "fieldsChanged": { "Issuer": { "from": "Aurora Retail", "to": "Aurora Retail Ltd" } },
+              "before": {
+                "id": 612, "issuer": "Aurora Retail", "cardProgramGroupName": "Aurora Elite",
+                "binIin": "401288", "merchantPrefix": "001", "merchantId": 12,
+                "instanceName": "North Zone", "customFields": { "Region": "North" }
+              },
+              "after": {
+                "id": 612, "issuer": "Aurora Retail Ltd", "cardProgramGroupName": "Aurora Elite",
+                "binIin": "401288", "merchantPrefix": "001", "merchantId": 12,
+                "instanceName": "North Zone", "customFields": { "Region": "North" }
+              }
+            },
+            {
+              "revisionId": 455,
+              "action": "delete",
+              "entityType": "bin_record",
+              "entityId": 599,
+              "occurredAt": "2026-09-24T09:40:00Z",
+              "actor": { "id": 12, "name": "Jane Doe" },
+              "targetLabel": "Cedar Mart — 340000002",
+              "changeDescription": "BIN record deleted",
+              "fieldsChanged": null,
+              "before": {
+                "id": 599, "issuer": "Cedar Mart", "cardProgramGroupName": "Cedar Prime",
+                "binIin": "340000", "merchantPrefix": "002", "merchantId": null,
+                "instanceName": "South Zone", "customFields": {}
+              },
+              "after": null
+            },
+            {
+              "revisionId": 454,
+              "action": "column",
+              "entityType": "bin_custom_column",
+              "entityId": 3,
+              "occurredAt": "2026-09-24T09:10:00Z",
+              "actor": { "id": 12, "name": "Jane Doe" },
+              "targetLabel": "Region",
+              "changeDescription": "Custom column created",
+              "fieldsChanged": null,
+              "before": null,
+              "after": { "id": 3, "key": "Region", "name": "Region", "displayOrder": 3 }
+            }
+          ],
+          "total": 214
+        }
+      },
+      "errorResponses": [
+        { "httpStatus": 401, "code": "AUTH_MISSING_CREDENTIALS", "when": "no/bad Authorization header" }
+      ],
+      "notes": [
+        "A revision created BEFORE this task shipped has no before/after snapshot in its stored metadata — its entry's `before`/`after` are simply null, NEVER reconstructed from current bin_records/bin_custom_columns state. Its `fieldsChanged`/`changeDescription`/`actor`/`occurredAt` are still fully populated (those existed already).",
+        "A deleted BIN record's history remains fully available: the entry's `before` snapshot was captured and persisted at delete time, and this endpoint only ever reads `revisions` — it never queries bin_records to reconstruct anything, so a since-deleted row's history is exactly as complete as any other entry's.",
+        "Bulk upload rows create action='upload' entries (never 'create'/'update') — same convention as the existing bulk-upload audit trail; each row's own before/after snapshot is included exactly like a single-row create/update would have."
+      ],
+      "audit": "None — read-only. This endpoint only reads existing revisions, it never writes one."
+    },
+    {
       "name": "Resolve one BIN record",
       "method": "GET",
-      "path": "/api/v1/bin-series/resolve",
+      "path": "/api/v1/bin-series/lookup",
+      "renamedFrom": "/api/v1/bin-series/resolve (API Naming task)",
       "auth": "required",
       "queryParams": {
         "binIin": { "type": "string", "required": true, "format": "exactly 6 digits" },
@@ -148,6 +420,7 @@
           "merchantPrefix": "001",
           "merchantId": 12,
           "instanceName": null,
+          "customFields": { "Region": "North", "Priority": "" },
           "updatedBy": null,
           "updatedAt": "2026-09-16T22:10:05.705688+00:00"
         }
@@ -159,9 +432,60 @@
       ]
     },
     {
+      "name": "BIN Series stats",
+      "method": "GET",
+      "path": "/api/v1/bin-series/statistics",
+      "renamedFrom": "/api/v1/bin-series/stats (API Naming task)",
+      "auth": "required",
+      "description": "Backs the frontend's StatCards on the BIN Series page (Total Records / Issuers / Card Programs), today computed client-side from the full local mock array. Always a whole-table aggregate — no pagination, no filters.",
+      "requestBody": null,
+      "successResponse": {
+        "httpStatus": 200,
+        "schema": "BinSeriesStatsResponse",
+        "example": { "totalRecords": 611, "totalIssuers": 10, "totalCardPrograms": 121 }
+      },
+      "errorResponses": [
+        { "httpStatus": 401, "code": "AUTH_MISSING_CREDENTIALS", "when": "no/bad Authorization header" }
+      ]
+    },
+    {
+      "name": "Bulk/multi-card resolve",
+      "method": "POST",
+      "path": "/api/v1/bin-series/bulk-lookup",
+      "renamedFrom": "/api/v1/bin-series/resolve-batch (API Naming task)",
+      "auth": "required",
+      "description": "Backs BulkLookupModal.jsx (opened from both BinResolver.jsx and BinTable.jsx) — resolve many card numbers in one request. MATCHING RULE is a documented SUPERSET of GET /lookup's rule, not a second inconsistent algorithm: exact (binIin, merchantPrefix) match when a full 3 prefix digits are present; otherwise, if the BIN uniquely identifies exactly one existing record, resolves to it anyway (never guesses among 2+ candidates) — exactly matching BulkLookupModal.jsx's own local resolve() function. Read-only: no actor, no audit revision, same as GET /lookup.",
+      "requestBody": {
+        "schema": "ResolveBatchRequest",
+        "example": { "cards": ["401288001", "401288 021", "9999999999"] }
+      },
+      "successResponse": {
+        "httpStatus": 200,
+        "schema": "ResolveBatchResponse",
+        "example": {
+          "results": [
+            { "input": "401288001", "binIin": "401288", "merchantPrefix": "001", "issuer": "Aurora Retail", "cardProgramGroupName": "Aurora Elite", "matched": true },
+            { "input": "401288 021", "binIin": "401288", "merchantPrefix": "021", "issuer": "Aurora Retail", "cardProgramGroupName": "Aurora Everyday", "matched": true },
+            { "input": "9999999999", "binIin": "999999", "merchantPrefix": "999", "issuer": null, "cardProgramGroupName": null, "matched": false }
+          ]
+        }
+      },
+      "errorResponses": [
+        { "httpStatus": 422, "code": "VALIDATION_ERROR", "when": "cards missing/absent, empty array, or over 1000 entries — rejects the WHOLE request" },
+        { "httpStatus": 401, "code": "AUTH_MISSING_CREDENTIALS", "when": "no/bad Authorization header" }
+      ],
+      "notes": [
+        "Every input card gets exactly one result, in input order — duplicates and unmatched/malformed cards are never dropped, merged, or treated as errors.",
+        "A card with fewer than 6 usable digits (including a blank string) resolves to matched:false with binIin/merchantPrefix both null — never a 422.",
+        "`input` is always the raw trimmed original string, never reformatted — a deliberate difference from the frontend's own current local resolve() function (see ResolveBatchResultItem's note).",
+        "Max 1000 cards per request — no limit exists in the current frontend; this reuses the same cap already established for POST /bulk-upload rather than inventing a new number."
+      ]
+    },
+    {
       "name": "Create BIN record",
       "method": "POST",
-      "path": "/api/v1/bin-series",
+      "path": "/api/v1/bin-series/create",
+      "renamedFrom": "/api/v1/bin-series (API Naming task)",
       "auth": "required",
       "requestBody": {
         "schema": "CreateBinRecordRequest",
@@ -171,7 +495,8 @@
           "binIin": "401288",
           "merchantPrefix": "001",
           "merchantId": 12,
-          "instanceName": "North Zone"
+          "instanceName": "North Zone",
+          "customFields": { "Region": "North" }
         },
         "minimalExample": {
           "issuer": "Aurora Retail",
@@ -192,6 +517,7 @@
           "merchantPrefix": "001",
           "merchantId": 12,
           "instanceName": "North Zone",
+          "customFields": { "Region": "North" },
           "updatedBy": "Jane Doe",
           "updatedAt": "2026-09-22T10:15:00+00:00"
         }
@@ -199,15 +525,80 @@
       "errorResponses": [
         { "httpStatus": 422, "code": "VALIDATION_ERROR", "when": "missing/blank issuer, cardProgramGroupName, or instanceName; malformed binIin/merchantPrefix" },
         { "httpStatus": 422, "code": "BIN_MERCHANT_NOT_FOUND", "when": "merchantId supplied but does not exist" },
+        { "httpStatus": 422, "code": "BIN_CUSTOM_COLUMN_NOT_FOUND", "when": "a customFields key does not reference an existing custom column" },
         { "httpStatus": 409, "code": "BIN_RECORD_ALREADY_EXISTS", "when": "(binIin, merchantPrefix) already exists" },
         { "httpStatus": 401, "code": "AUTH_MISSING_CREDENTIALS", "when": "no/bad Authorization header" }
       ],
       "audit": "Creates a revision: action=create, entityType=bin_record. Actor is always the authenticated caller, never client-supplied."
     },
     {
+      "name": "Bulk upload BIN records",
+      "method": "POST",
+      "path": "/api/v1/bin-series/bulk-upload",
+      "auth": "required",
+      "description": "Backs the frontend's BIN table \"Import Data\" button (UploadSheetModal.jsx). MATCHING KEY IS HYBRID: (binIin, merchantPrefix) is used when a row supplies both (the real, DB-unique key); otherwise the row falls back to an issuer-name match, but ONLY if that issuer matches exactly one existing record — an issuer matching 2+ records fails that row as ambiguous rather than guessing. This exists because the frontend's current client-side updateExisting() matches by issuer alone, and issuer is not globally unique (the frontend's own seed data has 'Aurora Retail' twice, at two different binIin/merchantPrefix pairs).",
+      "requestBody": {
+        "schema": "BulkUploadRequest",
+        "addNewExample": {
+          "mode": "addNew",
+          "instanceName": "North Zone",
+          "rows": [
+            { "issuer": "Aurora Retail", "cardProgramGroupName": "Aurora Elite", "binIin": "401288", "merchantPrefix": "001" },
+            { "issuer": "Bluewave Stores", "cardProgramGroupName": "Bluewave Plus", "binIin": "552461", "merchantPrefix": "004", "merchantId": 7 }
+          ]
+        },
+        "updateExistingByBinPrefixExample": {
+          "mode": "updateExisting",
+          "instanceName": "North Zone",
+          "rows": [
+            { "binIin": "401288", "merchantPrefix": "001", "cardProgramGroupName": "Aurora Elite Plus" }
+          ]
+        },
+        "updateExistingByIssuerFallbackExample": {
+          "mode": "updateExisting",
+          "instanceName": "North Zone",
+          "rows": [
+            { "issuer": "Aurora Retail", "cardProgramGroupName": "Aurora Elite Plus" }
+          ],
+          "note": "Only matches if 'Aurora Retail' is unique in the database — it is NOT in the real seed data (two rows share that issuer), so this exact example would fail as ambiguous against real data."
+        }
+      },
+      "successResponse": {
+        "httpStatus": 200,
+        "schema": "BulkUploadResponse",
+        "example": {
+          "mode": "addNew",
+          "totalRows": 2,
+          "createdCount": 1,
+          "updatedCount": 0,
+          "skippedCount": 0,
+          "failedCount": 1,
+          "failedRows": [
+            { "rowIndex": 1, "binIin": "552461", "merchantPrefix": "004", "reason": "No merchant found for merchantId=7." }
+          ],
+          "skippedRows": []
+        }
+      },
+      "errorResponses": [
+        { "httpStatus": 422, "code": "VALIDATION_ERROR", "when": "instanceName missing/blank, mode invalid/missing, or rows array empty/absent/over 1000 entries — these reject the WHOLE request (request-shape problems, not per-row)" },
+        { "httpStatus": 401, "code": "AUTH_MISSING_CREDENTIALS", "when": "no/bad Authorization header" }
+      ],
+      "notes": [
+        "Per-row outcomes never reject the whole request — see failedRows (validation problem, ambiguous match, or write conflict) and skippedRows (updateExisting only: no matching row found, or nothing actually changed) in the response instead.",
+        "addNew: duplicate (binIin, merchantPrefix) — whether against an existing DB row or another row earlier in the same batch — fails that row only, with reason 'A BIN record already exists...'. Issuer duplication is NOT an error for addNew.",
+        "updateExisting: a row with no matching (binIin, merchantPrefix) or issuer is reported in skippedRows and is NEVER created — use mode=addNew for that.",
+        "updateExisting: only non-blank fields in a row are applied; binIin/merchantPrefix in a row are used ONLY to find the record when both are present, never to change it.",
+        "updateExisting: if two rows in the same batch resolve to the same existing record, they are applied in order — the later row's values win.",
+        "updateExisting: the batch-level instanceName only fills in a matched row that has none yet — it never overwrites a row's existing instanceName.",
+        "Max 1000 rows per request."
+      ],
+      "audit": "One revision PER successfully written row (not one for the whole batch): action=upload, entityType=bin_record — deliberately 'upload', not 'create'/'update', so bulk-import events stay distinguishable from manual single-row edits in revision history. Actor is always the authenticated caller. Each row's write + its revision are atomic with each other (one savepoint per row) — a mid-batch failure only rolls back that one row, never the rows before or after it."
+    },
+    {
       "name": "Update BIN record",
       "method": "PUT",
-      "path": "/api/v1/bin-series/{binRecordId}",
+      "path": "/api/v1/bin-series/{binRecordId}/update",
+      "renamedFrom": "/api/v1/bin-series/{binRecordId} (API Naming task)",
       "auth": "required",
       "pathParams": {
         "binRecordId": { "type": "integer", "min": 1 }
@@ -221,6 +612,9 @@
         },
         "singleFieldExample": {
           "cardProgramGroupName": "Aurora Elite Plus"
+        },
+        "customFieldExample": {
+          "customFields": { "Region": "South" }
         }
       },
       "successResponse": {
@@ -234,6 +628,7 @@
           "merchantPrefix": "001",
           "merchantId": 12,
           "instanceName": "South Zone",
+          "customFields": { "Region": "South" },
           "updatedBy": "Jane Doe",
           "updatedAt": "2026-09-22T11:00:00+00:00"
         }
@@ -242,6 +637,7 @@
         { "httpStatus": 404, "code": "BIN_RECORD_NOT_FOUND", "when": "binRecordId does not exist" },
         { "httpStatus": 422, "code": "VALIDATION_ERROR", "when": "malformed binIin/merchantPrefix, or instanceName sent as empty/whitespace" },
         { "httpStatus": 422, "code": "BIN_MERCHANT_NOT_FOUND", "when": "merchantId supplied but does not exist" },
+        { "httpStatus": 422, "code": "BIN_CUSTOM_COLUMN_NOT_FOUND", "when": "a customFields key does not reference an existing custom column" },
         { "httpStatus": 422, "code": "BIN_INSTANCE_NAME_REQUIRED", "when": "instanceName sent as explicit null, OR this update changes something while the record still has no instanceName" },
         { "httpStatus": 409, "code": "BIN_RECORD_ALREADY_EXISTS", "when": "changing binIin/merchantPrefix would collide with another record" },
         { "httpStatus": 401, "code": "AUTH_MISSING_CREDENTIALS", "when": "no/bad Authorization header" }
@@ -256,7 +652,8 @@
     {
       "name": "Delete BIN record",
       "method": "DELETE",
-      "path": "/api/v1/bin-series/{binRecordId}",
+      "path": "/api/v1/bin-series/{binRecordId}/delete",
+      "renamedFrom": "/api/v1/bin-series/{binRecordId} (API Naming task)",
       "auth": "required",
       "pathParams": {
         "binRecordId": { "type": "integer", "min": 1 }
@@ -272,21 +669,97 @@
         { "httpStatus": 401, "code": "AUTH_MISSING_CREDENTIALS", "when": "no/bad Authorization header" }
       ],
       "audit": "Creates a revision: action=delete, entityType=bin_record, entityId=the deleted record's former id (soft reference, not a FK — survives the record's deletion). Actor is always the authenticated caller."
+    },
+    {
+      "name": "List custom columns",
+      "method": "GET",
+      "path": "/api/v1/bin-series/custom-columns",
+      "renamedFrom": "/api/v1/bin-series/columns (API Naming task)",
+      "auth": "required",
+      "description": "Backs BinTable.jsx's column registry. Returns every custom column in display order (creation sequence — the frontend always appends new columns after existing ones; there is no reorder capability, so this order never changes after creation).",
+      "requestBody": null,
+      "successResponse": {
+        "httpStatus": 200,
+        "schema": "array of CustomColumnResponse",
+        "example": [
+          { "id": 1, "key": "Region", "name": "Region", "displayOrder": 1, "updatedBy": "Jane Doe", "updatedAt": "2026-09-22T10:00:00+00:00" },
+          { "id": 2, "key": "Priority", "name": "Priority Level", "displayOrder": 2, "updatedBy": "Jane Doe", "updatedAt": "2026-09-22T10:05:00+00:00" }
+        ]
+      },
+      "errorResponses": [
+        { "httpStatus": 401, "code": "AUTH_MISSING_CREDENTIALS", "when": "no/bad Authorization header" }
+      ]
+    },
+    {
+      "name": "Create custom column",
+      "method": "POST",
+      "path": "/api/v1/bin-series/custom-columns/create",
+      "renamedFrom": "/api/v1/bin-series/columns (API Naming task)",
+      "auth": "required",
+      "description": "Backs AddColumnModal.jsx. Creates a new custom column and, if defaultValue is supplied, backfills it onto EVERY existing bin_records row in the same transaction (else every existing row gets an empty string for this column) — matches AddColumnModal.jsx's 'applied to all N existing records at once' behavior exactly. The new column's `key` is set once, permanently, to the initial (trimmed/whitespace-collapsed) `name` — renaming later never changes it.",
+      "requestBody": {
+        "schema": "CreateCustomColumnRequest",
+        "example": { "name": "Region", "defaultValue": "Unassigned" },
+        "minimalExample": { "name": "Region" }
+      },
+      "successResponse": {
+        "httpStatus": 201,
+        "schema": "CustomColumnResponse",
+        "example": { "id": 3, "key": "Region", "name": "Region", "displayOrder": 3, "updatedBy": "Jane Doe", "updatedAt": "2026-09-22T10:10:00+00:00" }
+      },
+      "errorResponses": [
+        { "httpStatus": 422, "code": "VALIDATION_ERROR", "when": "name missing/blank/whitespace-only" },
+        { "httpStatus": 409, "code": "BIN_CUSTOM_COLUMN_ALREADY_EXISTS", "when": "a custom column with this name (case-insensitive) already exists" },
+        { "httpStatus": 401, "code": "AUTH_MISSING_CREDENTIALS", "when": "no/bad Authorization header" }
+      ],
+      "audit": "Creates a revision: action=create, entityType=bin_custom_column. Actor is always the authenticated caller. The column-metadata insert and the existing-row backfill are one atomic transaction — never a partially-applied column."
+    },
+    {
+      "name": "Rename custom column",
+      "method": "PATCH",
+      "path": "/api/v1/bin-series/custom-columns/{columnId}/rename",
+      "renamedFrom": "/api/v1/bin-series/columns/{columnId} (API Naming task)",
+      "auth": "required",
+      "pathParams": {
+        "columnId": { "type": "integer", "min": 1 }
+      },
+      "description": "Backs EditableHeader.jsx's column rename. Changes ONLY the column's display `name` — its `key` (and therefore every bin_records.customFields value already stored under it) is completely untouched, exactly matching BinTable.jsx's renameColumn(). Resending the current name is a no-op: 200 OK, no audit revision.",
+      "requestBody": {
+        "schema": "RenameCustomColumnRequest",
+        "example": { "name": "Priority Level" }
+      },
+      "successResponse": {
+        "httpStatus": 200,
+        "schema": "CustomColumnResponse",
+        "example": { "id": 2, "key": "Priority", "name": "Priority Level", "displayOrder": 2, "updatedBy": "Jane Doe", "updatedAt": "2026-09-22T10:20:00+00:00" }
+      },
+      "errorResponses": [
+        { "httpStatus": 404, "code": "BIN_CUSTOM_COLUMN_NOT_FOUND", "when": "columnId does not exist" },
+        { "httpStatus": 422, "code": "VALIDATION_ERROR", "when": "name missing/blank/whitespace-only" },
+        { "httpStatus": 409, "code": "BIN_CUSTOM_COLUMN_ALREADY_EXISTS", "when": "another custom column already has this name (case-insensitive)" },
+        { "httpStatus": 401, "code": "AUTH_MISSING_CREDENTIALS", "when": "no/bad Authorization header" }
+      ],
+      "audit": "Creates a revision only if the name actually changed: action=update, entityType=bin_custom_column. Actor is always the authenticated caller."
     }
   ],
   "notImplemented": {
     "description": "Explicitly out of scope so far — do not assume these exist.",
     "items": [
-      "Bulk BIN import/upsert (no endpoint)",
-      "Bulk single-column update (no endpoint)",
-      "Batch/multi-card resolve (no endpoint)",
-      "Dynamic/custom columns on BIN records",
+      "Bulk single-column update (no endpoint) — e.g. ColumnUploadModal.jsx's per-column bulk value upload",
+      "Delete a custom column — the frontend has no delete-column capability at all, so no DELETE /bin-series/custom-columns/{columnId} endpoint exists",
+      "Reorder custom columns — the frontend has no reorder UI, so displayOrder is pure creation sequence and there is no endpoint to change it",
+      "Rename a BASE column (issuer, cardProgramGroupName, binIin, merchantPrefix, merchantId, instanceName) — confirmed frontend-only/never persisted for base columns either, so no backend change was made for this",
+      "A separate Version History 'detail' / 'get one revision' endpoint (e.g. GET /bin-series/version-history/{revisionId}) — confirmed by inspection that ChangePreviewModal.jsx re-uses the SAME entry object already returned by the list, never a second request, so GET /bin-series/version-history's own entries already carry everything a detail view would need",
+      "Per-record Version History (e.g. GET /bin-series/{binRecordId}/version-history) — confirmed the approved frontend's Version History panel is GLOBAL to the whole table, not scoped to one row",
       "SOP write APIs of any kind (SOP is currently read-only: GET sheet detail, GET sheet rows, GET common escalation)"
     ]
   },
   "openQuestionsForProduct": [
     "Should 'issuer' be renamed to 'issuerName'? No field called 'merchantName' was found in the BIN domain to rename — 'issuer' already serves that role and matches the frontend's own field name.",
     "Confirm the instanceName-mandatory-on-update interpretation: a real write must leave the record with a non-blank instanceName, but omitting it is fine if the record already has one.",
-    "What should instanceName actually reference long-term (currently a free-text string, no backend 'instances' table exists)?"
+    "What should instanceName actually reference long-term (currently a free-text string, no backend 'instances' table exists)?",
+    "BLOCKER for real frontend integration: UploadSheetModal.jsx collects no instanceName at all today (batch-level or per-row) — the bulk-upload endpoint requires one. Frontend work is needed to add this before the Import Data flow can actually call this endpoint.",
+    "The current updateExisting() in BinTable.jsx matches by issuer only; the backend now supports (binIin, merchantPrefix) as the primary key with issuer as a safe fallback — frontend would need to start sending binIin/merchantPrefix per row (it already has this data available from formColumns) to use the safer path.",
+    "GET /bin-series/export deliberately omits merchantId and instanceName from the CSV, matching the approved frontend's local mock row shape exactly (data/binSeries.js has neither field) — same underlying mismatch already flagged above for instanceName/merchantId generally. If product wants these two fields in the exported CSV, the frontend's own row shape (and therefore its Export button) would need to grow them first — this endpoint was built to replicate today's approved Export behavior, not to unilaterally add columns the UI has never shown."
   ]
 }

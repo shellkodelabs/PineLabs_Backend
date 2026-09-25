@@ -38,7 +38,7 @@ from app.models import Revision, User
 # /api/v1/dashboard/*, /api/v1/bin-series/*, /api/v1/merchants/*,
 # /api/v1/sop/*").
 PROTECTED_ENDPOINTS = [
-    "/api/v1/bin-series",
+    "/api/v1/bin-series/list",
     "/api/v1/merchants",
     "/api/v1/sop/escalation/common",
     "/api/v1/users",
@@ -69,7 +69,7 @@ def test_protected_endpoints_without_credentials_return_401(raw_client):
 def test_protected_endpoint_with_invalid_credentials_returns_401(raw_client):
     # Well-formed "Bearer <token>" header, but no real provider exists to
     # validate ANY token against yet — always rejected.
-    resp = raw_client.get("/api/v1/bin-series", headers={"Authorization": "Bearer this-is-not-a-real-token"})
+    resp = raw_client.get("/api/v1/bin-series/list", headers={"Authorization": "Bearer this-is-not-a-real-token"})
     assert resp.status_code == 401
     assert resp.json()["error"]["code"] == "AUTH_PROVIDER_NOT_CONFIGURED"
 
@@ -79,7 +79,7 @@ def test_protected_endpoint_with_malformed_bearer_token_returns_401(raw_client):
     # (auto_error=False) can't parse this as bearer credentials at all,
     # so it's treated as missing, distinctly from a well-formed-but-
     # rejected token above.
-    resp = raw_client.get("/api/v1/bin-series", headers={"Authorization": "TotallyNotBearer abc123"})
+    resp = raw_client.get("/api/v1/bin-series/list", headers={"Authorization": "TotallyNotBearer abc123"})
     assert resp.status_code == 401
     assert resp.json()["error"]["code"] == "AUTH_MISSING_CREDENTIALS"
 
@@ -111,7 +111,7 @@ def test_get_current_user_resolves_via_provider_boundary(raw_client):
 
     app.dependency_overrides[get_auth_provider] = lambda: _FakeSucceedingProvider()
     try:
-        resp = raw_client.get("/api/v1/bin-series", headers={"Authorization": "Bearer a-token-value"})
+        resp = raw_client.get("/api/v1/bin-series/list", headers={"Authorization": "Bearer a-token-value"})
     finally:
         app.dependency_overrides.pop(get_auth_provider, None)
 
@@ -125,7 +125,7 @@ def test_dependency_override_grants_access_to_protected_endpoint(api_client):
     test_protected_endpoints_without_credentials_return_401) succeeds
     normally here, via the SAME override mechanism every other test file
     in this suite relies on."""
-    resp = api_client.get("/api/v1/bin-series")
+    resp = api_client.get("/api/v1/bin-series/list")
     assert resp.status_code == 200
 
 
@@ -140,7 +140,7 @@ def test_production_auth_never_returns_a_hardcoded_identity(raw_client):
     token never succeeds and never returns any CurrentUser — there is no
     fallback/default identity anywhere in the real (non-overridden) code
     path, for any token value."""
-    resp = raw_client.get("/api/v1/bin-series", headers={"Authorization": "Bearer any-token-whatsoever"})
+    resp = raw_client.get("/api/v1/bin-series/list", headers={"Authorization": "Bearer any-token-whatsoever"})
     assert resp.status_code == 401
     assert resp.json()["error"]["code"] == "AUTH_PROVIDER_NOT_CONFIGURED"
 
@@ -249,8 +249,8 @@ def test_unauthenticated_cannot_access_dashboard(raw_client):
 
 
 def test_unauthenticated_cannot_access_bin_apis(raw_client):
-    assert raw_client.get("/api/v1/bin-series").status_code == 401
-    assert raw_client.get("/api/v1/bin-series/resolve", params={"binIin": "401288", "merchantPrefix": "001"}).status_code == 401
+    assert raw_client.get("/api/v1/bin-series/list").status_code == 401
+    assert raw_client.get("/api/v1/bin-series/lookup", params={"binIin": "401288", "merchantPrefix": "001"}).status_code == 401
 
 
 def test_unauthenticated_cannot_access_merchant_apis(raw_client):
@@ -270,7 +270,7 @@ def test_unauthenticated_cannot_access_sop_apis(raw_client):
 
 def test_auth_failure_does_not_expose_token_contents(raw_client):
     secret_looking_token = "super-secret-token-value-should-never-appear-in-response-xyz123"
-    resp = raw_client.get("/api/v1/bin-series", headers={"Authorization": f"Bearer {secret_looking_token}"})
+    resp = raw_client.get("/api/v1/bin-series/list", headers={"Authorization": f"Bearer {secret_looking_token}"})
     assert resp.status_code == 401
     assert secret_looking_token not in resp.text
 

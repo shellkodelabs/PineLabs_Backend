@@ -91,7 +91,7 @@ VALID_PAYLOAD = {
 
 def test_create_valid_bin_record(api_client, act_as, actor):
     act_as(actor)
-    resp = api_client.post("/api/v1/bin-series", json=VALID_PAYLOAD)
+    resp = api_client.post("/api/v1/bin-series/create", json=VALID_PAYLOAD)
     assert resp.status_code == 201
     body = resp.json()
     assert body["issuer"] == VALID_PAYLOAD["issuer"]
@@ -107,41 +107,41 @@ def test_create_valid_bin_record(api_client, act_as, actor):
 def test_create_with_merchant_id(api_client, act_as, actor, merchant):
     act_as(actor)
     payload = {**VALID_PAYLOAD, "binIin": "999102", "merchantId": merchant.id}
-    resp = api_client.post("/api/v1/bin-series", json=payload)
+    resp = api_client.post("/api/v1/bin-series/create", json=payload)
     assert resp.status_code == 201
     assert resp.json()["merchantId"] == merchant.id
 
 
 def test_create_invalid_bin_iin_rejected(api_client, act_as, actor):
     act_as(actor)
-    too_short = api_client.post("/api/v1/bin-series", json={**VALID_PAYLOAD, "binIin": "1234"})
+    too_short = api_client.post("/api/v1/bin-series/create", json={**VALID_PAYLOAD, "binIin": "1234"})
     assert too_short.status_code == 422
     assert too_short.json()["error"]["code"] == "VALIDATION_ERROR"
 
-    non_digits = api_client.post("/api/v1/bin-series", json={**VALID_PAYLOAD, "binIin": "12AB56"})
+    non_digits = api_client.post("/api/v1/bin-series/create", json={**VALID_PAYLOAD, "binIin": "12AB56"})
     assert non_digits.status_code == 422
 
 
 def test_create_invalid_merchant_prefix_rejected(api_client, act_as, actor):
     act_as(actor)
-    too_short = api_client.post("/api/v1/bin-series", json={**VALID_PAYLOAD, "merchantPrefix": "1"})
+    too_short = api_client.post("/api/v1/bin-series/create", json={**VALID_PAYLOAD, "merchantPrefix": "1"})
     assert too_short.status_code == 422
     assert too_short.json()["error"]["code"] == "VALIDATION_ERROR"
 
-    non_digits = api_client.post("/api/v1/bin-series", json={**VALID_PAYLOAD, "merchantPrefix": "abc"})
+    non_digits = api_client.post("/api/v1/bin-series/create", json={**VALID_PAYLOAD, "merchantPrefix": "abc"})
     assert non_digits.status_code == 422
 
 
 def test_create_blank_issuer_rejected(api_client, act_as, actor):
     act_as(actor)
-    resp = api_client.post("/api/v1/bin-series", json={**VALID_PAYLOAD, "issuer": ""})
+    resp = api_client.post("/api/v1/bin-series/create", json={**VALID_PAYLOAD, "issuer": ""})
     assert resp.status_code == 422
     assert resp.json()["error"]["code"] == "VALIDATION_ERROR"
 
 
 def test_create_blank_card_program_group_name_rejected(api_client, act_as, actor):
     act_as(actor)
-    resp = api_client.post("/api/v1/bin-series", json={**VALID_PAYLOAD, "cardProgramGroupName": ""})
+    resp = api_client.post("/api/v1/bin-series/create", json={**VALID_PAYLOAD, "cardProgramGroupName": ""})
     assert resp.status_code == 422
     assert resp.json()["error"]["code"] == "VALIDATION_ERROR"
 
@@ -153,7 +153,7 @@ def test_create_duplicate_bin_iin_and_merchant_prefix_returns_409(api_client, db
     )
     act_as(actor)
     resp = api_client.post(
-        "/api/v1/bin-series",
+        "/api/v1/bin-series/create",
         json={**VALID_PAYLOAD, "binIin": "999103", "merchantPrefix": "001"},
     )
     assert resp.status_code == 409
@@ -162,7 +162,7 @@ def test_create_duplicate_bin_iin_and_merchant_prefix_returns_409(api_client, db
 
 def test_create_invalid_merchant_id_rejected(api_client, act_as, actor):
     act_as(actor)
-    resp = api_client.post("/api/v1/bin-series", json={**VALID_PAYLOAD, "binIin": "999104", "merchantId": 999999999})
+    resp = api_client.post("/api/v1/bin-series/create", json={**VALID_PAYLOAD, "binIin": "999104", "merchantId": 999999999})
     assert resp.status_code == 422
     assert resp.json()["error"]["code"] == "BIN_MERCHANT_NOT_FOUND"
 
@@ -170,7 +170,7 @@ def test_create_invalid_merchant_id_rejected(api_client, act_as, actor):
 def test_create_audit_revision_created(api_client, db_session, act_as, actor):
     act_as(actor)
     before = _count_revisions(db_session)
-    resp = api_client.post("/api/v1/bin-series", json={**VALID_PAYLOAD, "binIin": "999105"})
+    resp = api_client.post("/api/v1/bin-series/create", json={**VALID_PAYLOAD, "binIin": "999105"})
     assert resp.status_code == 201
     new_id = resp.json()["id"]
 
@@ -187,7 +187,7 @@ def test_create_actor_comes_from_current_user(api_client, db_session, act_as, ac
     whoever is authenticated — there is no client-suppliable field for
     either (CreateBinRecordRequest has no actor/updatedBy field at all)."""
     act_as(actor)
-    resp = api_client.post("/api/v1/bin-series", json={**VALID_PAYLOAD, "binIin": "999106"})
+    resp = api_client.post("/api/v1/bin-series/create", json={**VALID_PAYLOAD, "binIin": "999106"})
     new_id = resp.json()["id"]
 
     [revision] = _revisions_for(db_session, new_id)
@@ -205,7 +205,7 @@ def test_create_actor_comes_from_current_user(api_client, db_session, act_as, ac
 def test_update_issuer(api_client, db_session, act_as, actor):
     record = _make_bin(db_session, issuer="Test Bin Crud Before", card_program_group_name="P", bin_iin="999200", merchant_prefix="001")
     act_as(actor)
-    resp = api_client.put(f"/api/v1/bin-series/{record.id}", json={"issuer": "Test Bin Crud After"})
+    resp = api_client.put(f"/api/v1/bin-series/{record.id}/update", json={"issuer": "Test Bin Crud After"})
     assert resp.status_code == 200
     assert resp.json()["issuer"] == "Test Bin Crud After"
 
@@ -213,7 +213,7 @@ def test_update_issuer(api_client, db_session, act_as, actor):
 def test_update_card_program_group_name(api_client, db_session, act_as, actor):
     record = _make_bin(db_session, issuer="Test Bin Crud X", card_program_group_name="Before Program", bin_iin="999201", merchant_prefix="001")
     act_as(actor)
-    resp = api_client.put(f"/api/v1/bin-series/{record.id}", json={"cardProgramGroupName": "After Program"})
+    resp = api_client.put(f"/api/v1/bin-series/{record.id}/update", json={"cardProgramGroupName": "After Program"})
     assert resp.status_code == 200
     assert resp.json()["cardProgramGroupName"] == "After Program"
 
@@ -221,7 +221,7 @@ def test_update_card_program_group_name(api_client, db_session, act_as, actor):
 def test_update_bin_iin(api_client, db_session, act_as, actor):
     record = _make_bin(db_session, issuer="Test Bin Crud X", card_program_group_name="P", bin_iin="999202", merchant_prefix="001")
     act_as(actor)
-    resp = api_client.put(f"/api/v1/bin-series/{record.id}", json={"binIin": "999203"})
+    resp = api_client.put(f"/api/v1/bin-series/{record.id}/update", json={"binIin": "999203"})
     assert resp.status_code == 200
     assert resp.json()["binIin"] == "999203"
 
@@ -229,7 +229,7 @@ def test_update_bin_iin(api_client, db_session, act_as, actor):
 def test_update_merchant_prefix(api_client, db_session, act_as, actor):
     record = _make_bin(db_session, issuer="Test Bin Crud X", card_program_group_name="P", bin_iin="999204", merchant_prefix="001")
     act_as(actor)
-    resp = api_client.put(f"/api/v1/bin-series/{record.id}", json={"merchantPrefix": "099"})
+    resp = api_client.put(f"/api/v1/bin-series/{record.id}/update", json={"merchantPrefix": "099"})
     assert resp.status_code == 200
     assert resp.json()["merchantPrefix"] == "099"
 
@@ -237,7 +237,7 @@ def test_update_merchant_prefix(api_client, db_session, act_as, actor):
 def test_update_merchant_id(api_client, db_session, act_as, actor, merchant):
     record = _make_bin(db_session, issuer="Test Bin Crud X", card_program_group_name="P", bin_iin="999205", merchant_prefix="001")
     act_as(actor)
-    resp = api_client.put(f"/api/v1/bin-series/{record.id}", json={"merchantId": merchant.id})
+    resp = api_client.put(f"/api/v1/bin-series/{record.id}/update", json={"merchantId": merchant.id})
     assert resp.status_code == 200
     assert resp.json()["merchantId"] == merchant.id
 
@@ -245,7 +245,7 @@ def test_update_merchant_id(api_client, db_session, act_as, actor, merchant):
 def test_update_invalid_merchant_id_rejected(api_client, db_session, act_as, actor):
     record = _make_bin(db_session, issuer="Test Bin Crud X", card_program_group_name="P", bin_iin="999206", merchant_prefix="001")
     act_as(actor)
-    resp = api_client.put(f"/api/v1/bin-series/{record.id}", json={"merchantId": 999999999})
+    resp = api_client.put(f"/api/v1/bin-series/{record.id}/update", json={"merchantId": 999999999})
     assert resp.status_code == 422
     assert resp.json()["error"]["code"] == "BIN_MERCHANT_NOT_FOUND"
 
@@ -256,7 +256,7 @@ def test_update_partial_only_changes_supplied_field(api_client, db_session, act_
         bin_iin="999207", merchant_prefix="001",
     )
     act_as(actor)
-    resp = api_client.put(f"/api/v1/bin-series/{record.id}", json={"issuer": "Test Bin Crud Partial Updated"})
+    resp = api_client.put(f"/api/v1/bin-series/{record.id}/update", json={"issuer": "Test Bin Crud Partial Updated"})
     assert resp.status_code == 200
     body = resp.json()
     assert body["issuer"] == "Test Bin Crud Partial Updated"
@@ -267,7 +267,7 @@ def test_update_partial_only_changes_supplied_field(api_client, db_session, act_
 
 def test_update_nonexistent_id_returns_404(api_client, act_as, actor):
     act_as(actor)
-    resp = api_client.put("/api/v1/bin-series/999999999", json={"issuer": "Nope"})
+    resp = api_client.put("/api/v1/bin-series/999999999/update", json={"issuer": "Nope"})
     assert resp.status_code == 404
     assert resp.json()["error"]["code"] == "BIN_RECORD_NOT_FOUND"
 
@@ -276,7 +276,7 @@ def test_update_duplicate_natural_key_returns_409(api_client, db_session, act_as
     a = _make_bin(db_session, issuer="Test Bin Crud A", card_program_group_name="P", bin_iin="999208", merchant_prefix="001")
     b = _make_bin(db_session, issuer="Test Bin Crud B", card_program_group_name="P", bin_iin="999209", merchant_prefix="002")
     act_as(actor)
-    resp = api_client.put(f"/api/v1/bin-series/{b.id}", json={"binIin": a.bin_iin, "merchantPrefix": a.merchant_prefix})
+    resp = api_client.put(f"/api/v1/bin-series/{b.id}/update", json={"binIin": a.bin_iin, "merchantPrefix": a.merchant_prefix})
     assert resp.status_code == 409
     assert resp.json()["error"]["code"] == "BIN_RECORD_ALREADY_EXISTS"
 
@@ -291,7 +291,7 @@ def test_update_unchanged_creates_no_revision(api_client, db_session, act_as, ac
 
     # Resending the SAME current values — not a real change.
     resp = api_client.put(
-        f"/api/v1/bin-series/{record.id}",
+        f"/api/v1/bin-series/{record.id}/update",
         json={"issuer": "Test Bin Crud NoChange", "cardProgramGroupName": "Same Program"},
     )
     assert resp.status_code == 200
@@ -308,7 +308,7 @@ def test_update_unchanged_does_not_touch_updated_by_or_updated_at(api_client, db
     original_updated_at = record.updated_at
 
     act_as(actor)
-    resp = api_client.put(f"/api/v1/bin-series/{record.id}", json={"issuer": "Test Bin Crud Untouched"})
+    resp = api_client.put(f"/api/v1/bin-series/{record.id}/update", json={"issuer": "Test Bin Crud Untouched"})
     assert resp.status_code == 200
 
     db_session.refresh(record)
@@ -319,7 +319,7 @@ def test_update_unchanged_does_not_touch_updated_by_or_updated_at(api_client, db
 def test_update_sets_updated_by_user_id_to_current_authenticated_user(api_client, db_session, act_as, actor):
     record = _make_bin(db_session, issuer="Test Bin Crud UpdatedBy", card_program_group_name="P", bin_iin="999212", merchant_prefix="001")
     act_as(actor)
-    resp = api_client.put(f"/api/v1/bin-series/{record.id}", json={"issuer": "Test Bin Crud UpdatedBy2"})
+    resp = api_client.put(f"/api/v1/bin-series/{record.id}/update", json={"issuer": "Test Bin Crud UpdatedBy2"})
     assert resp.status_code == 200
     assert resp.json()["updatedBy"] == actor.name
 
@@ -330,7 +330,7 @@ def test_update_sets_updated_by_user_id_to_current_authenticated_user(api_client
 def test_update_revision_contains_correct_actor(api_client, db_session, act_as, actor):
     record = _make_bin(db_session, issuer="Test Bin Crud RevActor", card_program_group_name="P", bin_iin="999213", merchant_prefix="001")
     act_as(actor)
-    resp = api_client.put(f"/api/v1/bin-series/{record.id}", json={"issuer": "Test Bin Crud RevActor2"})
+    resp = api_client.put(f"/api/v1/bin-series/{record.id}/update", json={"issuer": "Test Bin Crud RevActor2"})
     assert resp.status_code == 200
 
     [revision] = _revisions_for(db_session, record.id)
@@ -350,7 +350,7 @@ def test_delete_successful(api_client, db_session, act_as, actor):
     record = _make_bin(db_session, issuer="Test Bin Crud Delete", card_program_group_name="P", bin_iin="999300", merchant_prefix="001")
     record_id = record.id
     act_as(actor)
-    resp = api_client.delete(f"/api/v1/bin-series/{record_id}")
+    resp = api_client.delete(f"/api/v1/bin-series/{record_id}/delete")
     assert resp.status_code == 200
     assert resp.json() == {"id": record_id, "deleted": True}
     assert db_session.get(BinRecord, record_id) is None
@@ -358,7 +358,7 @@ def test_delete_successful(api_client, db_session, act_as, actor):
 
 def test_delete_nonexistent_id_returns_404(api_client, act_as, actor):
     act_as(actor)
-    resp = api_client.delete("/api/v1/bin-series/999999999")
+    resp = api_client.delete("/api/v1/bin-series/999999999/delete")
     assert resp.status_code == 404
     assert resp.json()["error"]["code"] == "BIN_RECORD_NOT_FOUND"
 
@@ -368,7 +368,7 @@ def test_delete_creates_revision(api_client, db_session, act_as, actor):
     record_id = record.id
     act_as(actor)
     before = _count_revisions(db_session)
-    resp = api_client.delete(f"/api/v1/bin-series/{record_id}")
+    resp = api_client.delete(f"/api/v1/bin-series/{record_id}/delete")
     assert resp.status_code == 200
     assert _count_revisions(db_session) == before + 1
 
@@ -377,7 +377,7 @@ def test_delete_revision_entity_id_equals_deleted_row_id(api_client, db_session,
     record = _make_bin(db_session, issuer="Test Bin Crud DeleteId", card_program_group_name="P", bin_iin="999302", merchant_prefix="001")
     record_id = record.id
     act_as(actor)
-    resp = api_client.delete(f"/api/v1/bin-series/{record_id}")
+    resp = api_client.delete(f"/api/v1/bin-series/{record_id}/delete")
     assert resp.status_code == 200
 
     [revision] = _revisions_for(db_session, record_id)
@@ -390,7 +390,7 @@ def test_delete_actor_is_current_authenticated_user(api_client, db_session, act_
     record = _make_bin(db_session, issuer="Test Bin Crud DeleteActor", card_program_group_name="P", bin_iin="999303", merchant_prefix="001")
     record_id = record.id
     act_as(actor)
-    resp = api_client.delete(f"/api/v1/bin-series/{record_id}")
+    resp = api_client.delete(f"/api/v1/bin-series/{record_id}/delete")
     assert resp.status_code == 200
 
     [revision] = _revisions_for(db_session, record_id)
@@ -407,7 +407,7 @@ def test_delete_actor_is_current_authenticated_user(api_client, db_session, act_
 
 
 def test_regression_list_api_still_works(api_client):
-    resp = api_client.get("/api/v1/bin-series", params={"page": 1, "pageSize": 5})
+    resp = api_client.get("/api/v1/bin-series/list", params={"page": 1, "pageSize": 5})
     assert resp.status_code == 200
     body = resp.json()
     assert set(body.keys()) == {"items", "total", "page", "pageSize"}
@@ -424,7 +424,7 @@ def test_regression_resolve_api_still_works_for_pre_existing_style_row(api_clien
         db_session, issuer="Test Bin Regression Resolve", card_program_group_name="Regression Program",
         bin_iin="999501", merchant_prefix="001", instance_name=None,
     )
-    resp = api_client.get("/api/v1/bin-series/resolve", params={"binIin": "999501", "merchantPrefix": "001"})
+    resp = api_client.get("/api/v1/bin-series/lookup", params={"binIin": "999501", "merchantPrefix": "001"})
     assert resp.status_code == 200
     body = resp.json()
     assert body["issuer"] == "Test Bin Regression Resolve"

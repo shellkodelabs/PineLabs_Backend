@@ -2,8 +2,8 @@
 Aggregates all /api/v1 routers into a single APIRouter.
 
 BIN Series (Part 7), Merchants (Part 8), SOP (Part 9), User Management
-(Part 10), Revision History-read (Part 11), and Dashboard-read (Part 12)
-are implemented.
+(Part 10), Revision History-read (Part 11), Dashboard-read (Part 12),
+and Instances-read (Bin Series gap-analysis API #1) are implemented.
 
 Part 14: every router registered here now requires authentication
 (`dependencies=[Depends(get_current_user)]`), applied per-router at
@@ -20,7 +20,7 @@ doesn't create a route conflict.
 """
 from fastapi import APIRouter, Depends
 
-from app.api.v1 import bin_series, dashboard, merchants, revisions, sop, users
+from app.api.v1 import bin_series, dashboard, instances, merchants, revisions, sop, users
 from app.core.auth import get_current_user
 
 api_router = APIRouter()
@@ -34,6 +34,7 @@ api_router.include_router(sop.common_escalation_router, prefix="/sop", tags=["so
 api_router.include_router(users.router, prefix="/users", tags=["users"], dependencies=_auth_required)
 api_router.include_router(revisions.router, prefix="/revisions", tags=["revisions"], dependencies=_auth_required)
 api_router.include_router(dashboard.router, prefix="/dashboard", tags=["dashboard"], dependencies=_auth_required)
+api_router.include_router(instances.router, prefix="/instances", tags=["instances"], dependencies=_auth_required)
 
 # Future domain routers will be registered here, e.g.:
 #

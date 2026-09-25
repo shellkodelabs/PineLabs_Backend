@@ -9,7 +9,9 @@ Every model module is imported here so that:
      (e.g. Merchant.bin_records -> "BinRecord") resolve correctly once
      every mapped class has been registered.
 """
+from app.models.bin_custom_column import BinCustomColumn  # noqa: F401
 from app.models.bin_record import BinRecord  # noqa: F401
+from app.models.instance import Instance  # noqa: F401
 from app.models.merchant import Merchant  # noqa: F401
 from app.models.revision import Revision  # noqa: F401
 from app.models.sop import SopColumn, SopColumnGroup, SopRow, SopSheet  # noqa: F401
@@ -18,6 +20,8 @@ from app.models.user import User, UserSopSheetAccess  # noqa: F401
 __all__ = [
     "Merchant",
     "BinRecord",
+    "BinCustomColumn",
+    "Instance",
     "SopSheet",
     "SopColumnGroup",
     "SopColumn",
