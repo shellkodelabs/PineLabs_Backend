@@ -16,6 +16,12 @@ pydantic==2.9.2
 pydantic-settings==2.5.2
 python-dotenv==1.0.1
 
+# --- Bin Series bulk-upload file parsing (Stage 6 follow-up: Gift Card/
+# Wallet bulk-upload now accepts a real .xlsx/.csv file via FastAPI
+# UploadFile, not just a pre-parsed JSON body) ---
+openpyxl==3.1.5
+python-multipart==0.0.12
+
 # --- Testing ---
 pytest==8.3.3
 httpx==0.27.2

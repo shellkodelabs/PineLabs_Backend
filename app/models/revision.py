@@ -18,6 +18,20 @@ always means a specific row). Row-level custom-FIELD-VALUE changes
 column create/rename get this new entity_type. Requires a migration
 (the CHECK constraint must be dropped and recreated with the expanded
 value list — Postgres has no ALTER CHECK).
+
+New Excel-format Bin Series task: `gift_card_bin_record`/
+`wallet_bin_record`/`gift_card_bin_custom_column`/
+`wallet_bin_custom_column` added, mirroring the `bin_record`/
+`bin_custom_column` split above but for the two new, completely
+independent Bin Series tables (see app/models/gift_card_bin_record.py,
+app/models/wallet_bin_record.py, and their custom-column-registry
+counterparts). `bin_record`/`bin_custom_column` are KEPT, unchanged —
+the old `bin_records`/`bin_custom_columns` tables remain in place as
+legacy data, and any historical revision rows already referencing them
+must stay valid. Migration: migrations/versions/
+b0892cfc6659_create_gift_card_and_wallet_bin_tables.py (drops and
+recreates ck_revisions_entity_type with all six original values plus
+these four new ones — Postgres has no ALTER CHECK).
 """
 from datetime import datetime
 from typing import Optional
@@ -40,7 +54,18 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.core.database import Base
 
 ACTION_TYPE_VALUES = ("create", "update", "delete", "upload")
-ENTITY_TYPE_VALUES = ("bin_record", "merchant", "sop_sheet", "sop_row", "user", "bin_custom_column")
+ENTITY_TYPE_VALUES = (
+    "bin_record",
+    "merchant",
+    "sop_sheet",
+    "sop_row",
+    "user",
+    "bin_custom_column",
+    "gift_card_bin_record",
+    "wallet_bin_record",
+    "gift_card_bin_custom_column",
+    "wallet_bin_custom_column",
+)
 
 _action_type_check_sql = "action_type IN ({})".format(", ".join(f"'{value}'" for value in ACTION_TYPE_VALUES))
 _entity_type_check_sql = "entity_type IN ({})".format(", ".join(f"'{value}'" for value in ENTITY_TYPE_VALUES))
