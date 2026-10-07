@@ -20,7 +20,7 @@ python-dotenv==1.0.1
 # Wallet bulk-upload now accepts a real .xlsx/.csv file via FastAPI
 # UploadFile, not just a pre-parsed JSON body) ---
 openpyxl==3.1.5
-python-multipart==0.0.12
+python-multipart==0.0.31
 
 # --- Testing ---
 pytest==8.3.3
