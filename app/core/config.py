@@ -28,6 +28,20 @@ class Settings(BaseSettings):
     AUTH_ISSUER: Optional[str] = None
     AUTH_AUDIENCE: Optional[str] = None
 
+    # --- DEV-ONLY authentication shortcut --------------------------------
+    # LOCAL DEVELOPMENT ONLY. When True, app.core.auth.get_auth_provider()
+    # returns a DevAuthenticationProvider that treats the bearer token as a
+    # user email, resolves it against the local `users` table, and returns
+    # that user — so the frontend/Swagger can authenticate as a real DB
+    # user while the real Pine Labs SSO/OIDC provider is still pending.
+    #
+    # Defaults to False, so unless a local .env explicitly sets it, behavior
+    # is IDENTICAL to before (every request rejected by
+    # UnconfiguredAuthenticationProvider). MUST remain False/unset in
+    # staging and production — this is not a real authentication mechanism
+    # (it verifies no token signature; it trusts the email as-is).
+    DEV_AUTH_ENABLED: bool = False
+
     # SQLAlchemy connection string, e.g.
     # postgresql+psycopg2://user:password@host:5432/dbname
     # Required — intentionally has no default so a missing configuration
@@ -43,6 +57,31 @@ class Settings(BaseSettings):
     CORS_ORIGINS: str = ""
 
     API_V1_PREFIX: str = "/api/v1"
+
+    # --- Instance import (background job system) -------------------------
+    # Bounds and knobs for the multi-file Instance Management import
+    # (POST /instances/import -> background job). All have safe defaults so
+    # the feature works out-of-the-box; override per-environment in .env.
+    #
+    # IMPORT_MAX_FILES: reject an upload that carries more than this many
+    #   files, so a single request can't spawn an unbounded job.
+    # IMPORT_MAX_UPLOAD_BYTES: reject the request if the combined size of
+    #   all uploaded files exceeds this (default 100 MB). Guards memory and
+    #   temp-disk usage.
+    # IMPORT_TEMP_DIR: directory the worker stages uploaded files in while
+    #   a job runs (each file is written to disk on submit and read back by
+    #   the worker, so request memory is released immediately). Empty means
+    #   the OS default temp dir (tempfile.gettempdir()).
+    # IMPORT_JOB_RETENTION_MINUTES: how long a finished job's row (and its
+    #   staged files) are kept for progress/error polling before cleanup.
+    #
+    # NOTE: a job's files are always processed SEQUENTIALLY (one at a time)
+    # — a parallel/concurrency mode was prototyped and removed for now, so
+    # there is deliberately no worker-mode/concurrency setting here.
+    IMPORT_MAX_FILES: int = 20
+    IMPORT_MAX_UPLOAD_BYTES: int = 100 * 1024 * 1024
+    IMPORT_TEMP_DIR: str = ""
+    IMPORT_JOB_RETENTION_MINUTES: int = 1440
 
     model_config = SettingsConfigDict(
         env_file=".env",

@@ -23,7 +23,8 @@ from app.models.bin_custom_column import BinCustomColumn  # noqa: F401
 from app.models.bin_record import BinRecord  # noqa: F401
 from app.models.gift_card_bin_custom_column import GiftCardBinCustomColumn  # noqa: F401
 from app.models.gift_card_bin_record import GiftCardBinRecord  # noqa: F401
-from app.models.instance import Instance  # noqa: F401
+from app.models.instance import Instance, InstanceBuiltinColumn, InstanceColumn  # noqa: F401
+from app.models.instance_import import ImportFile, ImportJob, ImportSheet  # noqa: F401
 from app.models.merchant import Merchant  # noqa: F401
 from app.models.revision import Revision  # noqa: F401
 from app.models.sop import SopColumn, SopColumnGroup, SopRow, SopSheet  # noqa: F401
@@ -40,6 +41,11 @@ __all__ = [
     "WalletBinRecord",
     "WalletBinCustomColumn",
     "Instance",
+    "InstanceColumn",
+    "InstanceBuiltinColumn",
+    "ImportJob",
+    "ImportFile",
+    "ImportSheet",
     "SopSheet",
     "SopColumnGroup",
     "SopColumn",

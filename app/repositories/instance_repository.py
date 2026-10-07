@@ -1,33 +1,129 @@
 """
 Repository for `instances` — SQLAlchemy queries only. No business rules,
-no response-schema mapping, no HTTP concerns live here. Same pattern as
-app/repositories/merchant_repository.py (the closest existing analog:
-a simple, mostly-static lookup entity with a list endpoint).
+no response-schema mapping, no HTTP concerns live here. Same shape as
+merchant_repository / bin_repository.
 
 Index usage:
+  - `search`'s free-text `search` filter is a substring ILIKE across
+    `name` and `ticket_number` (the UI searches both); the trigram index
+    `ix_instances_name_trgm` accelerates the name half. ticket_number is
+    not trigram-indexed — at expected volumes this is negligible.
   - `search`'s exact `status` filter uses `ix_instances_status`.
-  - `search`'s free-text `search` filter is a substring ILIKE on `name`
-    — no trigram index (unlike Merchant/BinRecord/User/Revision): this
-    table is expected to stay small (a handful to a few dozen rows), so
-    a plain ILIKE needs no index-backed acceleration; adding pg_trgm
-    infrastructure for it would be premature per this task's "do not add
-    unnecessary fields/complexity" instruction.
-  - `updated_by_user` is eager-loaded via `joinedload` (one LEFT OUTER
-    JOIN) for the same N+1-avoidance reason as BinRecord's
-    `updated_by_user` (see app/repositories/bin_repository.py).
+  - `get_by_name` is an exact, case-insensitive match, backed by the
+    `uq_instances_name` unique constraint (at most one row can match).
+  - `updated_by_user` is eager-loaded via joinedload on every read that
+    feeds a response, so rendering a page of instances doesn't issue an
+    extra per-row query to resolve each one's `updatedBy` name (N+1),
+    same reasoning as bin_repository's joinedload of updated_by_user.
 """
 from typing import List, Optional, Tuple
 
-from sqlalchemy import asc, desc, func, select
+from sqlalchemy import asc, desc, func, or_, select
 from sqlalchemy.orm import Session, joinedload
 
 from app.models.instance import Instance
 
+# Maps the API's camelCase sortBy values to actual ORM columns.
 SORT_FIELD_MAP = {
     "name": Instance.name,
     "status": Instance.status,
     "id": Instance.id,
 }
+
+
+def get_by_id(session: Session, instance_id: int) -> Optional[Instance]:
+    stmt = (
+        select(Instance)
+        .options(joinedload(Instance.updated_by_user))
+        .where(Instance.id == instance_id)
+    )
+    return session.execute(stmt).scalar_one_or_none()
+
+
+def get_by_name(session: Session, name: str) -> Optional[Instance]:
+    """Exact, case-insensitive match only — never a partial match. Safe
+    to return a single row because instances.name is unique."""
+    stmt = (
+        select(Instance)
+        .options(joinedload(Instance.updated_by_user))
+        .where(func.lower(Instance.name) == name.strip().lower())
+    )
+    return session.execute(stmt).scalar_one_or_none()
+
+
+def list_by_names(session: Session, names: List[str]) -> List[Instance]:
+    """Fetch every instance whose (case-insensitive) name is in `names`,
+    in ONE query. Used by the bulk import to resolve which rows are
+    updates vs. creates without a per-row round-trip (avoids thousands of
+    get_by_name calls on a large upload). Matching mirrors get_by_name:
+    exact, case-insensitive."""
+    if not names:
+        return []
+    lowered = list({n.strip().lower() for n in names})
+    stmt = select(Instance).where(func.lower(Instance.name).in_(lowered))
+    return list(session.execute(stmt).scalars().all())
+
+
+def count_all(session: Session) -> int:
+    return session.scalar(select(func.count()).select_from(Instance)) or 0
+
+
+def count_by_status(session: Session, status: str) -> int:
+    return session.scalar(
+        select(func.count()).select_from(Instance).where(Instance.status == status)
+    ) or 0
+
+
+def list_for_export(
+    session: Session,
+    *,
+    search: Optional[str] = None,
+    status: Optional[str] = None,
+) -> List[Instance]:
+    """All matching instances (no pagination), ordered by name — used to
+    build an export file. Applies the SAME search/status filters as
+    `search()` so an export reflects what the user is currently viewing."""
+    stmt = select(Instance)
+    if search:
+        term = f"%{search.strip()}%"
+        stmt = stmt.where(or_(Instance.name.ilike(term), Instance.ticket_number.ilike(term)))
+    if status:
+        stmt = stmt.where(Instance.status == status)
+    stmt = stmt.order_by(func.lower(Instance.name), Instance.id)
+    return list(session.execute(stmt).scalars().all())
+
+
+def create(
+    session: Session,
+    *,
+    name: str,
+    status: str,
+    ticket_number: Optional[str],
+    updated_by_user_id: Optional[int],
+    custom_fields: Optional[dict] = None,
+) -> Instance:
+    instance = Instance(
+        name=name,
+        status=status,
+        ticket_number=ticket_number,
+        updated_by_user_id=updated_by_user_id,
+        custom_fields=custom_fields or {},
+    )
+    session.add(instance)
+    session.flush()
+    return instance
+
+
+def update_fields(session: Session, instance: Instance, **fields) -> Instance:
+    for key, value in fields.items():
+        setattr(instance, key, value)
+    session.flush()
+    return instance
+
+
+def delete(session: Session, instance: Instance) -> None:
+    session.delete(instance)
+    session.flush()
 
 
 def search(
@@ -40,30 +136,26 @@ def search(
     page: int = 1,
     page_size: int = 50,
 ) -> Tuple[List[Instance], int]:
-    """Filters, sorts, and paginates instances. Returns (items, total).
-
-    Default sort is by NAME (not id, unlike every other list endpoint in
-    this project) — an explicit, deliberate choice for this endpoint per
-    the task's instruction ("preferably by instance name"), since the
-    primary consumer is a dropdown where alphabetical order is the
-    useful default.
-    """
+    """Filters, sorts, and paginates instances. Returns (items, total)."""
     stmt = select(Instance).options(joinedload(Instance.updated_by_user))
 
     if search:
-        stmt = stmt.where(Instance.name.ilike(f"%{search.strip()}%"))
+        term = f"%{search.strip()}%"
+        # Match the instance name OR the ticket number — the UI's search
+        # box is labelled "Search instance or ticket number". ticket_number
+        # is nullable; ILIKE against NULL is simply NULL (never matches),
+        # so no explicit NULL guard is needed.
+        stmt = stmt.where(or_(Instance.name.ilike(term), Instance.ticket_number.ilike(term)))
     if status:
         stmt = stmt.where(Instance.status == status)
 
     total = session.scalar(select(func.count()).select_from(stmt.subquery()))
 
-    sort_column = SORT_FIELD_MAP.get(sort_by, Instance.name)
+    sort_column = SORT_FIELD_MAP.get(sort_by, Instance.id)
     order_fn = desc if sort_order == "desc" else asc
     order_clauses = [order_fn(sort_column)]
     if sort_column is not Instance.id:
-        # Deterministic tiebreaker — without this, pagination across
-        # pages is not guaranteed stable when sorting by a non-unique
-        # field.
+        # Deterministic tiebreaker for stable pagination across pages.
         order_clauses.append(Instance.id)
     stmt = stmt.order_by(*order_clauses)
 

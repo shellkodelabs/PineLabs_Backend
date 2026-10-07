@@ -90,6 +90,51 @@ class UnconfiguredAuthenticationProvider(AuthenticationProvider):
         )
 
 
+class DevAuthenticationProvider(AuthenticationProvider):
+    """
+    LOCAL-DEVELOPMENT-ONLY provider. Active ONLY when
+    settings.DEV_AUTH_ENABLED is True (default False) — see
+    get_auth_provider(). It exists so the frontend / Swagger can
+    authenticate as a REAL row in the local `users` table while the real
+    Pine Labs SSO/OIDC provider is still pending.
+
+    HOW IT WORKS: the bearer token is treated as a user's EMAIL. It is
+    looked up (case-insensitively) in the `users` table; if a matching
+    user exists it becomes the CurrentUser, otherwise the request is
+    rejected. Usage: `Authorization: Bearer someone@pinelabs.com`.
+
+    THIS IS NOT REAL AUTHENTICATION and must never run outside local dev:
+    it verifies NO token signature and NO password — it trusts the email
+    at face value. The DEV_AUTH_ENABLED flag defaults to False and must
+    stay False/unset in staging and production. Nothing about the
+    Unconfigured path or the (future) real-provider path is changed by
+    this class; it is an additional, opt-in branch only.
+    """
+
+    def authenticate(self, token: str, db: Session) -> CurrentUser:
+        # Imported here (not at module top) to keep the auth boundary's
+        # import surface unchanged for the production paths, and to avoid
+        # any import cycle between auth and the repository layer.
+        from app.repositories import user_repository
+
+        email = token.strip()
+        user = user_repository.get_by_email(db, email) if email else None
+        if user is None:
+            raise UnauthorizedError(
+                "Dev auth is enabled but no user matches the supplied token. "
+                "Pass an existing user's email as the bearer token, e.g. "
+                "'Authorization: Bearer someone@pinelabs.com'.",
+                code="DEV_AUTH_USER_NOT_FOUND",
+            )
+        if user.status != "Active":
+            raise UnauthorizedError(
+                f"Dev auth: user {user.email!r} exists but is not Active "
+                f"(status={user.status!r}).",
+                code="DEV_AUTH_USER_NOT_ACTIVE",
+            )
+        return CurrentUser(id=user.id, name=user.name, email=user.email, role=user.role, status=user.status)
+
+
 def get_auth_provider() -> AuthenticationProvider:
     """
     FastAPI dependency (override-able in tests — see
@@ -102,8 +147,18 @@ def get_auth_provider() -> AuthenticationProvider:
     provider (JWKS fetch + token verification against the actual Pine
     Labs issuer) would be constructed here once that configuration is
     confirmed — not implemented yet.
+
+    DEV-ONLY BRANCH: if settings.DEV_AUTH_ENABLED is True (local dev
+    only, default False), the DevAuthenticationProvider is returned so a
+    real DB user can be authenticated by passing their email as the
+    bearer token. This branch is checked FIRST but is inert unless the
+    flag is explicitly enabled — with the flag off (the default, and the
+    required state in staging/production) the behavior below is exactly
+    as it was before this branch existed.
     """
     settings = get_settings()
+    if settings.DEV_AUTH_ENABLED:
+        return DevAuthenticationProvider()
     if not settings.AUTH_ISSUER or not settings.AUTH_AUDIENCE:
         return UnconfiguredAuthenticationProvider()
     # A real provider implementation goes here once Pine Labs' actual
