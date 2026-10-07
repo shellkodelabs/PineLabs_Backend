@@ -38,6 +38,12 @@ EXPECTED_TABLES = {
     "users",
     "user_sop_sheet_access",
     "revisions",
+    # Instance Management (added after Part 5): the instances entity, its
+    # user-defined custom column definitions, and the persisted built-in
+    # column display order (drag-and-drop reordering).
+    "instances",
+    "instance_columns",
+    "instance_builtin_columns",
 }
 
 

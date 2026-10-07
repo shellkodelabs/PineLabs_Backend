@@ -71,6 +71,7 @@ api_router.include_router(
     bin_series_wallet.router, prefix="/bin-series/wallet", tags=["bin-series"], dependencies=_auth_required
 )
 api_router.include_router(bin_series.router, prefix="/bin-series", tags=["bin-series"], dependencies=_auth_required)
+api_router.include_router(instances.router, prefix="/instances", tags=["instances"], dependencies=_auth_required)
 api_router.include_router(merchants.router, prefix="/merchants", tags=["merchants"], dependencies=_auth_required)
 api_router.include_router(sop.merchant_sheets_router, prefix="/merchants", tags=["sop"], dependencies=_auth_required)
 api_router.include_router(sop.common_escalation_router, prefix="/sop", tags=["sop"], dependencies=_auth_required)
