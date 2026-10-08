@@ -43,6 +43,7 @@ from app.schemas.instance import (
     DeleteInstanceResponse,
     ImportInstanceResponse,
     InstanceResponse,
+    InstanceIssuersResponse,
     InstanceStatsResponse,
     UpdateInstanceRequest,
 )
@@ -127,6 +128,20 @@ def list_instances(
 
 def get_instance(db: Session, *, instance_id: int) -> InstanceResponse:
     return _to_response(_require_instance(db, instance_id))
+
+def get_instance_issuers(db: Session, *, instance_id: int) -> InstanceIssuersResponse:
+    """The issuers grouped under an instance, derived from BIN records
+    (see instance_repository.list_issuers_for_instance_name). 404 if the
+    instance doesn't exist. The issuer list may be empty if no BIN
+    records reference this instance's name yet."""
+    instance = _require_instance(db, instance_id)
+    issuers = instance_repository.list_issuers_for_instance_name(db, instance.name)
+    return InstanceIssuersResponse(
+        instanceId=instance.id,
+        instanceName=instance.name,
+        issuers=issuers,
+        total=len(issuers),
+    )
 
 
 def create_instance(db: Session, payload: CreateInstanceRequest, *, actor_user_id: int) -> InstanceResponse:

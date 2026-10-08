@@ -52,6 +52,13 @@ class UserResponse(BaseModel):
     role: str
     status: str
     lastActiveAt: Optional[datetime] = None
+    # The user's selected scope (persisted in users.scope JSONB). The
+    # lists let the Edit modal pre-fill, and the counts drive the "N
+    # instances / M issuers" badges in the list page.
+    instanceIds: List[int] = Field(default_factory=list)
+    issuers: List[str] = Field(default_factory=list)
+    instanceCount: int = 0
+    issuerCount: int = 0
 
 
 # Named per the task's schema list; implemented as a reuse of the shared
@@ -73,6 +80,11 @@ class CreateUserRequest(BaseModel):
     mobile: Optional[str] = Field(None, min_length=1)
     role: Role
     access: Dict[str, List[str]] = Field(default_factory=dict)
+    # Selected scope from the Create User screen. Persisted on the user
+    # (users.scope) and echoed back in UserResponse for the list badges /
+    # Edit pre-fill. Both default to empty.
+    instanceIds: List[int] = Field(default_factory=list)
+    issuers: List[str] = Field(default_factory=list)
 
     @field_validator("email")
     @classmethod
@@ -92,6 +104,11 @@ class UpdateUserRequest(BaseModel):
     role: Optional[Role] = None
     status: Optional[Status] = None
     access: Optional[Dict[str, List[str]]] = None
+    # Scope lists use the same "omitted = unchanged" convention as the
+    # other optional fields: absent -> left as-is; provided -> replaces
+    # that list wholesale (an empty list clears it).
+    instanceIds: Optional[List[int]] = None
+    issuers: Optional[List[str]] = None
 
     @field_validator("email")
     @classmethod
@@ -104,3 +121,49 @@ class UpdateUserRequest(BaseModel):
 class DeleteUserResponse(BaseModel):
     success: bool
     message: str
+
+
+# =====================================================================
+# Consolidated single-endpoint CRUD (POST /users/manage)
+# =====================================================================
+# One endpoint that dispatches create / update / delete by an
+# `operation` discriminator, as an alternative to the individual REST
+# verbs (which remain available). Mirrors the "one endpoint, multiple
+# operations" convention used elsewhere (e.g. Instance Management's
+# /columns reorder). All sub-fields reuse the exact same validation as
+# the dedicated Create/Update requests.
+UserOperation = Literal["create", "update", "delete"]
+
+
+class ManageUserRequest(BaseModel):
+    """Single CRUD envelope for POST /users/manage.
+
+    - operation="create": `data` (CreateUserRequest shape) is required;
+      `userId` must be omitted.
+    - operation="update": `userId` and `data` (UpdateUserRequest shape,
+      all fields optional) are required.
+    - operation="delete": `userId` is required; `data` must be omitted.
+
+    The service validates these combinations and raises a 422
+    ValidationError on a mismatch, so the contract is enforced in one
+    place regardless of which operation the caller picks."""
+
+    operation: UserOperation
+    userId: Optional[int] = Field(None, ge=1, description="Target user id (required for update/delete).")
+    # Kept as a permissive dict and re-parsed into the specific
+    # Create/Update request inside the service, so this one envelope can
+    # carry either shape without a discriminated union at the edge.
+    data: Optional[Dict[str, object]] = Field(
+        None, description="User fields. CreateUserRequest shape for create; UpdateUserRequest shape for update; omit for delete."
+    )
+
+
+class ManageUserResponse(BaseModel):
+    """Uniform result for POST /users/manage. For create/update, `user`
+    holds the resulting user (with access); for delete, `user` is null
+    and `deleted` is true with the removed user's id in `userId`."""
+
+    operation: UserOperation
+    userId: Optional[int] = None
+    deleted: bool = False
+    user: Optional[UserAccessResponse] = None

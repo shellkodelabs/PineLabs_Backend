@@ -188,7 +188,7 @@ def test_two_shared_sheets_with_same_key_are_rejected(db_session):
 
 def test_user_can_receive_sheet_access(db_session):
     """8. User can receive sheet access."""
-    user = User(name="Test Agent", email="test.agent@example.invalid", role="Support Agent", status="Active")
+    user = User(name="Test Agent", email="test.agent@example.invalid", role="SME", status="Active")
     sheet = SopSheet(merchant_id=None, key="poc-access-test", name="POC")
     db_session.add_all([user, sheet])
     db_session.flush()
@@ -204,7 +204,7 @@ def test_user_can_receive_sheet_access(db_session):
 
 def test_duplicate_user_sheet_access_is_rejected(db_session):
     """9. Duplicate user-sheet access is rejected."""
-    user = User(name="Dup Agent", email="dup.agent@example.invalid", role="Support Agent", status="Active")
+    user = User(name="Dup Agent", email="dup.agent@example.invalid", role="SME", status="Active")
     sheet = SopSheet(merchant_id=None, key="poc-dup-test", name="POC")
     db_session.add_all([user, sheet])
     db_session.flush()
@@ -220,7 +220,7 @@ def test_duplicate_user_sheet_access_is_rejected(db_session):
 
 def test_revision_can_reference_a_user(db_session):
     """10. Revision can reference a user."""
-    user = User(name="Auditor One", email="auditor.one@example.invalid", role="Auditor", status="Active")
+    user = User(name="Viewer One", email="auditor.one@example.invalid", role="Viewer", status="Active")
     db_session.add(user)
     db_session.flush()
 

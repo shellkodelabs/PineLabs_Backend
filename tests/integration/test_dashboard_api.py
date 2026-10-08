@@ -84,7 +84,7 @@ def test_active_user_count_matches_database(api_client, db_session):
     assert before == db_count
 
     db_session.add(
-        User(name="Test Dashboard ActiveUser", email="test.dashboard.activeuser@example.invalid", role="Support Agent", status="Active")
+        User(name="Test Dashboard ActiveUser", email="test.dashboard.activeuser@example.invalid", role="SME", status="Active")
     )
     db_session.flush()
 
@@ -96,7 +96,7 @@ def test_active_user_count_excludes_inactive(api_client, db_session):
     before = api_client.get("/api/v1/dashboard/kpis").json()["kpis"]["activeUserCount"]
 
     db_session.add(
-        User(name="Test Dashboard InactiveUser", email="test.dashboard.inactiveuser@example.invalid", role="Support Agent", status="Inactive")
+        User(name="Test Dashboard InactiveUser", email="test.dashboard.inactiveuser@example.invalid", role="SME", status="Inactive")
     )
     db_session.flush()
 
@@ -134,7 +134,7 @@ def test_sop_sheet_count_includes_shared_sheet(api_client, db_session):
 def test_revisions_last_7_days_reflects_real_window(api_client, db_session):
     """Proves the 7-day filter both INCLUDES a recent row and EXCLUDES
     an old one — not just "counts everything"."""
-    user = User(name="Test Dashboard RevUser", email="test.dashboard.revuser@example.invalid", role="Support Agent", status="Active")
+    user = User(name="Test Dashboard RevUser", email="test.dashboard.revuser@example.invalid", role="SME", status="Active")
     db_session.add(user)
     db_session.flush()
 
@@ -190,7 +190,7 @@ def test_classification_counts_sum_to_merchant_count(api_client):
 
 
 def test_recent_activity_returns_latest_revisions(api_client, db_session):
-    user = User(name="Test Dashboard NewestUser", email="test.dashboard.newestuser@example.invalid", role="Support Agent", status="Active")
+    user = User(name="Test Dashboard NewestUser", email="test.dashboard.newestuser@example.invalid", role="SME", status="Active")
     db_session.add(user)
     db_session.flush()
     db_session.add(
@@ -218,7 +218,7 @@ def test_recent_activity_is_ordered_newest_first(api_client):
 
 
 def test_recent_activity_includes_user_information(api_client, db_session):
-    user = User(name="Test Dashboard UserInfo", email="test.dashboard.userinfo@example.invalid", role="Support Agent", status="Active")
+    user = User(name="Test Dashboard UserInfo", email="test.dashboard.userinfo@example.invalid", role="SME", status="Active")
     db_session.add(user)
     db_session.flush()
     db_session.add(

@@ -39,7 +39,7 @@ SEARCH_SCOPE = "Test Revision"
 @pytest.fixture()
 def seeded_revisions(db_session):
     user_a = User(name="Test Revision UserA", email="test.revision.usera@example.invalid", role="Admin", status="Active")
-    user_b = User(name="Test Revision UserB", email="test.revision.userb@example.invalid", role="Auditor", status="Active")
+    user_b = User(name="Test Revision UserB", email="test.revision.userb@example.invalid", role="Viewer", status="Active")
     db_session.add_all([user_a, user_b])
     db_session.flush()
 

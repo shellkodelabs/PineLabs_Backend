@@ -54,6 +54,7 @@ from app.schemas.instance import (
     ImportInstanceResponse,
     InstanceColumnResponse,
     InstanceColumnsResponse,
+    InstanceIssuersResponse,
     InstanceResponse,
     InstanceStatsResponse,
     LayoutColumnResponse,
@@ -550,6 +551,20 @@ def get_instance(
 ) -> InstanceResponse:
     """Single instance by id. 404 INSTANCE_NOT_FOUND if it doesn't exist."""
     return instance_service.get_instance(db, instance_id=instanceId)
+
+
+@router.get("/{instanceId}/issuers", response_model=InstanceIssuersResponse)
+def get_instance_issuers(
+    instanceId: int = Path(..., ge=1, description="Instance id"),
+    db: Session = Depends(get_db),
+) -> InstanceIssuersResponse:
+    """The issuers grouped under this instance, for the Create User
+    screen's instance->issuer drill-down. Derived from the DISTINCT
+    `issuer` values on the gift-card/wallet BIN records whose `instance`
+    matches this instance's name (there is no stored instance->issuer
+    link). 404 INSTANCE_NOT_FOUND if the instance doesn't exist; the
+    issuer list may be empty if no BIN records reference it yet."""
+    return instance_service.get_instance_issuers(db, instance_id=instanceId)
 
 
 @router.post("", response_model=InstanceResponse, status_code=status.HTTP_201_CREATED)

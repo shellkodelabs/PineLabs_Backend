@@ -26,11 +26,22 @@ from sqlalchemy import (
     func,
     text,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
 
-ROLE_VALUES = ("Admin", "Support Lead", "Support Agent", "Auditor")
+# Role vocabulary (single source of truth for the whole backend — the
+# CHECK constraint below, the Literal types in app/schemas/user.py, the
+# roles API in app/api/v1/roles.py, and require_roles() all derive from
+# this tuple). Reconciled with the frontend's roles so both sides speak
+# the same four names:
+#   Super Admin — all access, including User Management
+#   Admin       — all access EXCEPT User Management
+#   SME         — BIN view-only; SOP full CRUD; Generic Dashboard + Revision History view
+#   Viewer      — BIN / SOP / Generic Dashboard view-only (no Revision History)
+# The concrete per-role permission map lives in app/core/permissions.py.
+ROLE_VALUES = ("Super Admin", "Admin", "SME", "Viewer")
 STATUS_VALUES = ("Active", "Inactive", "Invited")
 
 _role_check_sql = "role IN ({})".format(", ".join(f"'{value}'" for value in ROLE_VALUES))
@@ -55,6 +66,18 @@ class User(Base):
     mobile: Mapped[Optional[str]] = mapped_column(String(30), nullable=True)
     role: Mapped[str] = mapped_column(String(30), nullable=False)
     status: Mapped[str] = mapped_column(String(20), nullable=False, server_default=text("'Invited'"))
+
+    # The user's selected scope from the Create/Edit User screen: which
+    # instances and which issuers they were granted. Stored as a JSONB
+    # document of the shape {"instanceIds": [int, ...], "issuers":
+    # [str, ...]} rather than new join tables — the frontend collects
+    # exactly these two lists, and there is no normalized issuer entity to
+    # FK against (issuers are free-text strings derived from BIN data; see
+    # instance_repository.list_issuers_for_instance_name). NOT NULL with a
+    # '{}' default so every row always has a well-formed object and the
+    # list page can safely read instanceIds/issuers counts.
+    scope: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+
     last_active_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(

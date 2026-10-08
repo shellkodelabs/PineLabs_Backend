@@ -18,9 +18,12 @@ Index usage:
 """
 from typing import List, Optional, Tuple
 
-from sqlalchemy import asc, desc, func, or_, select
+from sqlalchemy import asc, desc, func, or_, select, union
 from sqlalchemy.orm import Session, joinedload
 
+from app.models.gift_card_bin_record import GiftCardBinRecord
+
+from app.models.wallet_bin_record import WalletBinRecord
 from app.models.instance import Instance, InstanceDeletion, InstanceEdit
 
 # Maps the API's camelCase sortBy values to actual ORM columns.
@@ -62,6 +65,38 @@ def list_by_names(session: Session, names: List[str]) -> List[Instance]:
     lowered = list({n.strip().lower() for n in names})
     stmt = select(Instance).where(func.lower(Instance.name).in_(lowered))
     return list(session.execute(stmt).scalars().all())
+
+def list_issuers_for_instance_name(session: Session, instance_name: str) -> List[str]:
+    """Distinct issuer names grouped under an instance, derived from the
+    BIN record tables.
+
+    There is no stored instance->issuer relationship in the schema
+    (`instances` has no issuer link, and `issuer` is a free-text column
+    on the BIN tables), so "the issuers of an instance" is defined as the
+    set of DISTINCT `issuer` values across gift_card_bin_records and
+    wallet_bin_records whose `instance` column (case-insensitively)
+    matches the instance's name. Returned sorted, case-insensitively.
+
+    This is the real, queryable source for the Create User screen's
+    instance->issuer drill-down (the frontend previously used mock
+    `issuerIds` from sopData.js that have no backend equivalent)."""
+    name_lower = instance_name.strip().lower()
+
+    gift = select(GiftCardBinRecord.issuer.label("issuer")).where(
+        func.lower(GiftCardBinRecord.instance) == name_lower
+    )
+    wallet = select(WalletBinRecord.issuer.label("issuer")).where(
+        func.lower(WalletBinRecord.instance) == name_lower
+    )
+    combined = union(gift, wallet).subquery()
+    # DISTINCT only — Postgres rejects an ORDER BY expression (lower(...))
+    # that isn't in the SELECT list under SELECT DISTINCT, so the
+    # case-insensitive sort is applied in Python below.
+    stmt = select(combined.c.issuer).distinct()
+    issuers = list(session.execute(stmt).scalars().all())
+    issuers.sort(key=lambda s: s.lower())
+    return issuers
+
 
 
 def count_all(session: Session) -> int:

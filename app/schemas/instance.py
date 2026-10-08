@@ -382,3 +382,24 @@ class InstanceColumnsResponse(BaseModel):
 
     definitions: List[InstanceColumnResponse]
     layout: List[LayoutColumnResponse]
+
+
+
+# =====================================================================
+# Instance -> issuers drill-down (GET /instances/{id}/issuers)
+# =====================================================================
+class InstanceIssuersResponse(BaseModel):
+    """The issuers grouped under one instance, for the Create User
+    screen's instance->issuer selection.
+
+    `issuers` is the DISTINCT set of issuer names found on the BIN
+    records whose `instance` equals this instance's name (there is no
+    stored instance->issuer link in the schema — see
+    instance_repository.list_issuers_for_instance_name). Sorted,
+    case-insensitive. May be empty if no BIN records reference this
+    instance yet."""
+
+    instanceId: int
+    instanceName: str
+    issuers: List[str] = Field(default_factory=list)
+    total: int

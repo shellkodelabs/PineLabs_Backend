@@ -43,7 +43,7 @@ from app.models import Merchant, Revision, SopSheet, User, UserSopSheetAccess
 SEARCH_SCOPE = "Test User"
 
 
-def _make_user(db_session, *, name, email, mobile=None, role="Support Agent", status="Active"):
+def _make_user(db_session, *, name, email, mobile=None, role="SME", status="Active"):
     user = User(name=name, email=email, mobile=mobile, role=role, status=status)
     db_session.add(user)
     db_session.flush()
@@ -72,10 +72,10 @@ def actor(db_session):
 def seeded_users(db_session):
     return [
         _make_user(db_session, name="Test User Alpha", email="test.user.alpha@example.invalid", mobile="9111111111", role="Admin", status="Active"),
-        _make_user(db_session, name="Test User Beta", email="test.user.beta@example.invalid", mobile="9222222222", role="Support Lead", status="Active"),
-        _make_user(db_session, name="Test User Gamma", email="test.user.gamma@example.invalid", mobile="9333333333", role="Support Agent", status="Inactive"),
-        _make_user(db_session, name="Test User Delta", email="test.user.delta@example.invalid", mobile="9444444444", role="Auditor", status="Invited"),
-        _make_user(db_session, name="Test User Epsilon", email="test.user.epsilon@example.invalid", mobile="9555555555", role="Support Agent", status="Active"),
+        _make_user(db_session, name="Test User Beta", email="test.user.beta@example.invalid", mobile="9222222222", role="Admin", status="Active"),
+        _make_user(db_session, name="Test User Gamma", email="test.user.gamma@example.invalid", mobile="9333333333", role="SME", status="Inactive"),
+        _make_user(db_session, name="Test User Delta", email="test.user.delta@example.invalid", mobile="9444444444", role="Viewer", status="Invited"),
+        _make_user(db_session, name="Test User Epsilon", email="test.user.epsilon@example.invalid", mobile="9555555555", role="SME", status="Active"),
     ]
 
 
@@ -152,7 +152,7 @@ def test_search_by_mobile(api_client, seeded_users):
 
 
 def test_role_filter(api_client, seeded_users):
-    resp = api_client.get("/api/v1/users", params={"search": SEARCH_SCOPE, "role": "Support Agent"})
+    resp = api_client.get("/api/v1/users", params={"search": SEARCH_SCOPE, "role": "SME"})
     body = resp.json()
     assert body["total"] == 2
     names = {i["name"] for i in body["items"]}
@@ -248,7 +248,7 @@ def test_create_user(api_client, act_as, actor):
             "name": "Test User NewOne",
             "email": "test.user.newone@example.invalid",
             "mobile": "9000000001",
-            "role": "Support Agent",
+            "role": "SME",
         },
     )
     assert resp.status_code == 201
@@ -267,7 +267,7 @@ def test_create_user_with_no_access(api_client, act_as, actor):
         json={
             "name": "Test User NewTwo",
             "email": "test.user.newtwo@example.invalid",
-            "role": "Auditor",
+            "role": "Viewer",
             "access": {},
         },
     )
@@ -282,7 +282,7 @@ def test_create_user_with_sheet_access(api_client, act_as, actor, merchant_alpha
         json={
             "name": "Test User NewThree",
             "email": "test.user.newthree@example.invalid",
-            "role": "Support Agent",
+            "role": "SME",
             "access": {"Test Merchant UserApiAlpha": ["block", "poc"]},
         },
     )
@@ -309,7 +309,7 @@ def test_create_user_invalid_email_rejected(api_client, act_as, actor):
     act_as(actor)
     resp = api_client.post(
         "/api/v1/users",
-        json={"name": "Test User Bad", "email": "not-an-email", "role": "Support Agent"},
+        json={"name": "Test User Bad", "email": "not-an-email", "role": "SME"},
     )
     assert resp.status_code == 422
     assert resp.json()["error"]["code"] == "VALIDATION_ERROR"
@@ -317,7 +317,7 @@ def test_create_user_invalid_email_rejected(api_client, act_as, actor):
 
 def test_create_user_duplicate_email_rejected(api_client, act_as, actor):
     act_as(actor)
-    payload = {"name": "Test User Dup", "email": "test.user.dup@example.invalid", "role": "Support Agent"}
+    payload = {"name": "Test User Dup", "email": "test.user.dup@example.invalid", "role": "SME"}
     first = api_client.post("/api/v1/users", json=payload)
     assert first.status_code == 201
 
@@ -333,7 +333,7 @@ def test_create_user_nonexistent_merchant_in_access_rejected(api_client, db_sess
         json={
             "name": "Test User BadMerchant",
             "email": "test.user.badmerchant@example.invalid",
-            "role": "Support Agent",
+            "role": "SME",
             "access": {"Totally Fake Merchant XYZ": ["block"]},
         },
     )
@@ -353,7 +353,7 @@ def test_create_user_nonexistent_sheet_in_access_rejected(api_client, act_as, ac
         json={
             "name": "Test User BadSheet",
             "email": "test.user.badsheet@example.invalid",
-            "role": "Support Agent",
+            "role": "SME",
             "access": {"Test Merchant UserApiAlpha": ["not-a-real-key"]},
         },
     )
@@ -371,7 +371,7 @@ def test_create_user_sheet_from_another_merchant_rejected(api_client, act_as, ac
         json={
             "name": "Test User CrossMerchant",
             "email": "test.user.crossmerchant@example.invalid",
-            "role": "Support Agent",
+            "role": "SME",
             "access": {"Test Merchant UserApiAlpha": ["activation"]},
         },
     )
@@ -387,7 +387,7 @@ def test_create_user_transaction_rollback_on_partial_access_failure(api_client, 
         json={
             "name": "Test User Rollback",
             "email": email,
-            "role": "Support Agent",
+            "role": "SME",
             # first entry resolves and would succeed; second does not —
             # dict iteration order is insertion order in Python, so the
             # valid grant is attempted BEFORE the failure.
@@ -434,10 +434,10 @@ def test_update_basic_fields(api_client, act_as, actor, seeded_users):
 
 def test_update_role(api_client, act_as, actor, seeded_users):
     act_as(actor)
-    user = seeded_users[2]  # Support Agent
-    resp = api_client.put(f"/api/v1/users/{user.id}", json={"role": "Support Lead"})
+    user = seeded_users[2]  # SME
+    resp = api_client.put(f"/api/v1/users/{user.id}", json={"role": "Admin"})
     assert resp.status_code == 200
-    assert resp.json()["role"] == "Support Lead"
+    assert resp.json()["role"] == "Admin"
 
 
 def test_update_status(api_client, act_as, actor, seeded_users):

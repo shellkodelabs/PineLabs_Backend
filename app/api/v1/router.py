@@ -52,6 +52,7 @@ from app.api.v1 import (
     instances,
     merchants,
     revisions,
+    roles,
     sop,
     users,
 )
@@ -76,6 +77,7 @@ api_router.include_router(merchants.router, prefix="/merchants", tags=["merchant
 api_router.include_router(sop.merchant_sheets_router, prefix="/merchants", tags=["sop"], dependencies=_auth_required)
 api_router.include_router(sop.common_escalation_router, prefix="/sop", tags=["sop"], dependencies=_auth_required)
 api_router.include_router(users.router, prefix="/users", tags=["users"], dependencies=_auth_required)
+api_router.include_router(roles.router, prefix="/roles", tags=["roles"], dependencies=_auth_required)
 api_router.include_router(revisions.router, prefix="/revisions", tags=["revisions"], dependencies=_auth_required)
 api_router.include_router(dashboard.router, prefix="/dashboard", tags=["dashboard"], dependencies=_auth_required)
 api_router.include_router(instances.router, prefix="/instances", tags=["instances"], dependencies=_auth_required)

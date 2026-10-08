@@ -47,7 +47,16 @@ from app.core.exceptions import ConflictError, NotFoundError, ValidationError
 from app.models.user import User
 from app.repositories import merchant_repository, sop_repository, user_repository
 from app.schemas.common import PaginatedResponse
-from app.schemas.user import CreateUserRequest, DeleteUserResponse, UpdateUserRequest, UserAccessResponse, UserResponse
+from app.schemas.user import (
+    CreateUserRequest,
+    DeleteUserResponse,
+    ManageUserRequest,
+    ManageUserResponse,
+    UpdateUserRequest,
+    UserAccessResponse,
+    UserResponse,
+)
+from pydantic import ValidationError as PydanticValidationError
 from app.services import audit_service
 
 # Human-readable labels for the fields update_user() can change, in the
@@ -63,7 +72,20 @@ _UPDATABLE_FIELD_LABELS = [
 ]
 
 
+def _scope_lists(user: User) -> Tuple[List[int], List[str]]:
+    """Read the user's persisted scope (users.scope JSONB) into normalized
+    (instanceIds, issuers) lists, tolerating a missing/legacy-empty value."""
+    scope = user.scope or {}
+    instance_ids = scope.get("instanceIds") or []
+    issuers = scope.get("issuers") or []
+    # Defensive: ensure plain lists of the right primitive types.
+    instance_ids = [int(i) for i in instance_ids]
+    issuers = [str(s) for s in issuers]
+    return instance_ids, issuers
+
+
 def _user_to_response(user: User) -> UserResponse:
+    instance_ids, issuers = _scope_lists(user)
     return UserResponse(
         id=user.id,
         name=user.name,
@@ -72,6 +94,10 @@ def _user_to_response(user: User) -> UserResponse:
         role=user.role,
         status=user.status,
         lastActiveAt=user.last_active_at,
+        instanceIds=instance_ids,
+        issuers=issuers,
+        instanceCount=len(instance_ids),
+        issuerCount=len(issuers),
     )
 
 
@@ -97,11 +123,25 @@ def _require_user(db: Session, user_id: int) -> User:
 def _require_actor(db: Session, actor_user_id: int) -> User:
     """Same lookup as _require_user, with a distinct error message —
     an unresolvable actor is a real, reportable problem (e.g. a stale
-    actorUserId), not something to silently substitute a default for."""
+    actorUserId), not something to silently substitute a default for.
+
+    NOTE: the dev hardcoded super-admin login now resolves to a REAL,
+    persistent users row (see app/core/auth.DevAuthenticationProvider),
+    so this is a plain lookup again — no sentinel-id special case."""
     actor = user_repository.get_by_id(db, actor_user_id)
     if actor is None:
         raise NotFoundError(f"No user found for actorUserId={actor_user_id}.", code="ACTOR_NOT_FOUND")
     return actor
+
+
+def dev_superadmin_email() -> str:
+    """The configured hardcoded super-admin email (lower-cased), used to
+    hide that dev row from the user list so a wiped DB still shows an
+    empty roster. TEMP dev-only — remove when reverting the hardcoded
+    login."""
+    from app.core.config import get_settings
+
+    return (get_settings().DEV_AUTH_SUPERADMIN_EMAIL or "").strip().lower()
 
 
 def _resolve_sheet_id(db: Session, *, merchant_name: str, sheet_key: str) -> int:
@@ -187,6 +227,9 @@ def list_users(
         sort_order=sort_order,
         page=page,
         page_size=page_size,
+        # Hide the dev hardcoded super-admin from the roster so a wiped DB
+        # presents an empty list for testing the real create flow.
+        exclude_email=dev_superadmin_email() or None,
     )
     return PaginatedResponse[UserResponse](
         items=[_user_to_response(u) for u in users], total=total, page=page, pageSize=page_size
@@ -207,6 +250,13 @@ def create_user(db: Session, payload: CreateUserRequest, *, actor_user_id: int) 
     try:
         with db.begin_nested():
             user = user_repository.create(db, name=payload.name, email=payload.email, mobile=payload.mobile, role=payload.role)
+            # Persist the selected scope (instances + issuers) on the user.
+            # Set directly on the ORM object inside the savepoint so it
+            # commits/rolls back atomically with the rest of the create.
+            user.scope = {
+                "instanceIds": [int(i) for i in payload.instanceIds],
+                "issuers": [str(s) for s in payload.issuers],
+            }
             # Resolved and granted one at a time (not pre-validated in
             # bulk first) so a bad reference partway through genuinely
             # exercises rollback of everything already written in this
@@ -270,7 +320,23 @@ def update_user(db: Session, *, user_id: int, payload: UpdateUserRequest, actor_
         access_to_remove = existing_sheet_ids - requested_sheet_ids
         access_to_add = requested_sheet_ids - existing_sheet_ids
 
-    if not fields_to_set and not access_to_add and not access_to_remove:
+    # Scope (instances/issuers) change detection. Each list is replaced
+    # wholesale when provided; omitted lists leave that side unchanged.
+    cur_instance_ids, cur_issuers = _scope_lists(user)
+    new_scope: Optional[dict] = None
+    scope_changed = False
+    if payload.instanceIds is not None or payload.issuers is not None:
+        next_instance_ids = (
+            [int(i) for i in payload.instanceIds] if payload.instanceIds is not None else cur_instance_ids
+        )
+        next_issuers = (
+            [str(s) for s in payload.issuers] if payload.issuers is not None else cur_issuers
+        )
+        if next_instance_ids != cur_instance_ids or next_issuers != cur_issuers:
+            scope_changed = True
+            new_scope = {"instanceIds": next_instance_ids, "issuers": next_issuers}
+
+    if not fields_to_set and not access_to_add and not access_to_remove and not scope_changed:
         # Nothing would actually change — no write, no revision.
         return _user_with_access_response(db, user)
 
@@ -281,6 +347,16 @@ def update_user(db: Session, *, user_id: int, payload: UpdateUserRequest, actor_
         change_clauses.append(
             _describe_access_change(len(access_to_add), len(access_to_remove), is_first_clause=not change_clauses)
         )
+    if scope_changed:
+        clause = (
+            f"scope set to {len(new_scope['instanceIds'])} instance(s) and "
+            f"{len(new_scope['issuers'])} issuer(s)"
+        )
+        if change_clauses:
+            clause = clause[0].lower() + clause[1:]
+        else:
+            clause = clause[0].upper() + clause[1:]
+        change_clauses.append(clause)
     change_description = "; ".join(change_clauses)
 
     metadata = {}
@@ -290,11 +366,15 @@ def update_user(db: Session, *, user_id: int, payload: UpdateUserRequest, actor_
         metadata["accessGrantedSheetIds"] = sorted(access_to_add)
     if access_to_remove:
         metadata["accessRevokedSheetIds"] = sorted(access_to_remove)
+    if scope_changed:
+        metadata["scope"] = new_scope
 
     try:
         with db.begin_nested():
             if fields_to_set:
                 user_repository.update_fields(db, user, **fields_to_set)
+            if scope_changed:
+                user.scope = new_scope
             if access_to_remove:
                 user_repository.revoke_sheet_access(db, user_id=user.id, sheet_ids=access_to_remove)
             for sheet_id in access_to_add:
@@ -362,3 +442,81 @@ def delete_user(db: Session, *, user_id: int, actor_user_id: int) -> DeleteUserR
         ) from exc
 
     return DeleteUserResponse(success=True, message="User deleted successfully.")
+
+
+# =====================================================================
+# Consolidated single-endpoint CRUD dispatcher (POST /users/manage)
+# =====================================================================
+def manage_user(db: Session, payload: ManageUserRequest, *, actor_user_id: int) -> ManageUserResponse:
+    """Dispatch one of create/update/delete from a single request
+    envelope, delegating to the exact same create_user/update_user/
+    delete_user logic (so validation, access resolution, audit logging,
+    and transaction semantics are identical to the dedicated REST verbs).
+
+    The envelope's shape rules are enforced here and surfaced as 422
+    ValidationError so the contract is validated in one place:
+      - create: `data` required, `userId` must be absent
+      - update: `userId` + `data` required
+      - delete: `userId` required, `data` must be absent
+    `data` is re-parsed into the specific Create/Update request model, so
+    a malformed body raises the same field-level 422 a direct call would.
+    """
+    operation = payload.operation
+
+    if operation == "create":
+        if payload.userId is not None:
+            raise ValidationError(
+                "userId must not be provided for a create operation.",
+                code="USER_MANAGE_INVALID_PAYLOAD",
+            )
+        if payload.data is None:
+            raise ValidationError(
+                "data is required for a create operation.",
+                code="USER_MANAGE_INVALID_PAYLOAD",
+            )
+        create_request = _parse_sub_payload(CreateUserRequest, payload.data)
+        user = create_user(db, create_request, actor_user_id=actor_user_id)
+        return ManageUserResponse(operation="create", userId=user.id, user=user)
+
+    if operation == "update":
+        if payload.userId is None:
+            raise ValidationError(
+                "userId is required for an update operation.",
+                code="USER_MANAGE_INVALID_PAYLOAD",
+            )
+        if payload.data is None:
+            raise ValidationError(
+                "data is required for an update operation.",
+                code="USER_MANAGE_INVALID_PAYLOAD",
+            )
+        update_request = _parse_sub_payload(UpdateUserRequest, payload.data)
+        user = update_user(db, user_id=payload.userId, payload=update_request, actor_user_id=actor_user_id)
+        return ManageUserResponse(operation="update", userId=user.id, user=user)
+
+    # operation == "delete"
+    if payload.userId is None:
+        raise ValidationError(
+            "userId is required for a delete operation.",
+            code="USER_MANAGE_INVALID_PAYLOAD",
+        )
+    if payload.data is not None:
+        raise ValidationError(
+            "data must not be provided for a delete operation.",
+            code="USER_MANAGE_INVALID_PAYLOAD",
+        )
+    delete_user(db, user_id=payload.userId, actor_user_id=actor_user_id)
+    return ManageUserResponse(operation="delete", userId=payload.userId, deleted=True, user=None)
+
+
+def _parse_sub_payload(model, data: Dict[str, object]):
+    """Re-parse the loose `data` dict into a specific request model,
+    translating a Pydantic validation failure into the project's own
+    ValidationError (422) so the error envelope is consistent with every
+    other endpoint rather than FastAPI's raw 422 body."""
+    try:
+        return model.model_validate(data)
+    except PydanticValidationError as exc:
+        raise ValidationError(
+            f"Invalid user data for this operation: {exc.errors()[0].get('msg', 'validation error')}.",
+            code="USER_MANAGE_INVALID_PAYLOAD",
+        ) from exc

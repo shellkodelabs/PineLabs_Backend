@@ -41,6 +41,33 @@ REVISION_ENTITY_LABEL_MAP = {
     "User": "user",
 }
 
+# Role reconciliation between the frontend's mock users.js vocabulary
+# (Admin/SME/Automation/Viewer) and the backend's role vocabulary. Per
+# the product spec, the four frontend roles map onto the backend roles
+# (Super Admin/Admin/SME/Viewer — see app/models/user.ROLE_VALUES and
+# app/core/permissions.py) as:
+#   Admin      -> Super Admin  (all access, incl. User Management)
+#   Automation -> Admin        (all access EXCEPT User Management)
+#   SME        -> SME          (BIN view; SOP CRUD; dashboard + history view)
+#   Viewer     -> Viewer       (BIN / SOP / dashboard view-only)
+# Unmapped names pass through so validate()/the DB CHECK still catches
+# anything unexpected rather than this map hiding it.
+_FRONTEND_TO_BACKEND_ROLE = {
+    "Admin": "Super Admin",
+    "Automation": "Admin",
+    "SME": "SME",
+    "Viewer": "Viewer",
+}
+
+
+def map_frontend_role(frontend_role: str) -> str:
+    """Translate a frontend role name to a backend-allowed one. Unknown
+    roles pass through unchanged so validate()/the DB CHECK constraint
+    still catches anything genuinely unexpected rather than this map
+    silently hiding it."""
+    return _FRONTEND_TO_BACKEND_ROLE.get(frontend_role, frontend_role)
+
+
 THIS_DIR = Path(__file__).resolve().parent
 EXPORTER_SCRIPT = THIS_DIR / "export_frontend_data.mjs"
 
@@ -88,8 +115,13 @@ def run_frontend_exporter(frontend_data_dir: Path) -> LoadedMockData:
             "Set FRONTEND_DATA_DIR to the PineLabs_Frontend/src/data path if your layout differs."
         )
 
+    # The frontend modules use Vite-style extensionless relative imports
+    # (e.g. `import { instances } from './sopData'`) that Node's native
+    # ESM loader rejects. REGISTER_HOOK teaches this one-off Node run to
+    # resolve them the way Vite does, without modifying frontend source.
+    register_hook = THIS_DIR / "register_resolve_hook.mjs"
     result = subprocess.run(
-        ["node", str(EXPORTER_SCRIPT), str(frontend_data_dir)],
+        ["node", "--import", str(register_hook), str(EXPORTER_SCRIPT), str(frontend_data_dir)],
         capture_output=True,
         text=True,
         encoding="utf-8",
@@ -178,28 +210,64 @@ def validate(data: LoadedMockData) -> ValidationResult:
             result.add(f"users[{i}]: duplicate email {u['email']!r} also seen at index {seen_emails[email_key]}")
         else:
             seen_emails[email_key] = i
-        if u["role"] not in ROLE_VALUES:
-            result.add(f"users[{i}] ({u['name']!r}): role {u['role']!r} is not an allowed value")
+        # Validate the MAPPED role (see map_frontend_role / the Option A
+        # note). The frontend's new role vocabulary is translated to the
+        # backend's allowed set before insert, so validate against the
+        # translated value — an unmapped role still fails here.
+        mapped_role = map_frontend_role(u["role"])
+        if mapped_role not in ROLE_VALUES:
+            result.add(
+                f"users[{i}] ({u['name']!r}): role {u['role']!r} "
+                f"(mapped to {mapped_role!r}) is not an allowed value"
+            )
         if u["status"] not in STATUS_VALUES:
             result.add(f"users[{i}] ({u['name']!r}): status {u['status']!r} is not an allowed value")
 
     # --- Revisions -------------------------------------------------------------
-    user_names_lower = {u["name"].strip().lower() for u in data.users}
-    for i, r in enumerate(data.revisions):
-        if r["type"] not in ACTION_TYPE_VALUES:
-            result.add(f"revisions[{i}]: type {r['type']!r} is not an allowed action_type")
-        if r["entity"] not in REVISION_ENTITY_LABEL_MAP:
-            result.add(
-                f"revisions[{i}]: entity {r['entity']!r} has no unambiguous mapping to an allowed entity_type "
-                f"(known mappings: {list(REVISION_ENTITY_LABEL_MAP)})"
-            )
-        if r["user"].strip().lower() not in user_names_lower:
-            result.add(
-                f"revisions[{i}]: user {r['user']!r} does not match any imported user by "
-                f"case-insensitive exact name — cannot resolve the required revisions.user_id FK"
-            )
+    # The frontend's revisions.js has since been redesigned into a
+    # SOP-revision-workbook shape (instance/issuer/version/date/revisedBy/
+    # description/reviewer/ticket) and no longer carries the
+    # type/entity/user/timestamp/target/change fields the backend
+    # `revisions` table maps from. The frontend's Revision History screen
+    # also still reads that mock data directly and is NOT wired to the
+    # backend /api/v1/revisions endpoint. So when the source lacks the
+    # backend-contract fields, revision import is skipped (see
+    # revisions_importable / main()) rather than failing the whole seed —
+    # the backend revision rows aren't consumed by anything today, and
+    # fabricating the missing fields would be inventing data. Only
+    # validate revisions when they actually match the old importable shape.
+    if revisions_importable(data):
+        user_names_lower = {u["name"].strip().lower() for u in data.users}
+        for i, r in enumerate(data.revisions):
+            if r["type"] not in ACTION_TYPE_VALUES:
+                result.add(f"revisions[{i}]: type {r['type']!r} is not an allowed action_type")
+            if r["entity"] not in REVISION_ENTITY_LABEL_MAP:
+                result.add(
+                    f"revisions[{i}]: entity {r['entity']!r} has no unambiguous mapping to an allowed entity_type "
+                    f"(known mappings: {list(REVISION_ENTITY_LABEL_MAP)})"
+                )
+            if r["user"].strip().lower() not in user_names_lower:
+                result.add(
+                    f"revisions[{i}]: user {r['user']!r} does not match any imported user by "
+                    f"case-insensitive exact name — cannot resolve the required revisions.user_id FK"
+                )
 
     return result
+
+
+# The field set the backend `revisions` import maps from. If the frontend
+# mock data no longer provides these (it was redesigned — see validate()),
+# revision import is skipped rather than treated as a fatal error.
+_REVISION_REQUIRED_KEYS = frozenset({"type", "entity", "user", "timestamp", "target", "change"})
+
+
+def revisions_importable(data: LoadedMockData) -> bool:
+    """True only if every revision record carries the backend-contract
+    fields. An empty revision list is considered importable (nothing to
+    do). A single record missing any required key makes the whole set
+    non-importable, so the seed skips revisions cleanly instead of
+    partially importing a shape it doesn't understand."""
+    return all(_REVISION_REQUIRED_KEYS <= set(r.keys()) for r in data.revisions)
 
 
 def match_bin_issuers_to_merchants(data: LoadedMockData) -> dict:

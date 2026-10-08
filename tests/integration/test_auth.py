@@ -179,7 +179,7 @@ def test_user_post_ignores_actor_user_id_and_uses_authenticated_actor(api_client
         json={
             "name": "Test Auth PostIgnoresActorParam",
             "email": "test.auth.postignoresactorparam@example.invalid",
-            "role": "Support Agent",
+            "role": "SME",
         },
     )
     assert resp.status_code == 201
@@ -194,7 +194,7 @@ def test_user_post_ignores_actor_user_id_and_uses_authenticated_actor(api_client
 
 def test_user_put_ignores_actor_user_id_and_uses_authenticated_actor(api_client, db_session, act_as):
     """Covers items 9 and 12."""
-    target = User(name="Test Auth PutTarget", email="test.auth.puttarget@example.invalid", role="Support Agent", status="Invited")
+    target = User(name="Test Auth PutTarget", email="test.auth.puttarget@example.invalid", role="SME", status="Invited")
     real_actor = User(name="Test Auth RealActorUpdate", email="test.auth.realactorupdate@example.invalid", role="Admin", status="Active")
     decoy = User(name="Test Auth DecoyUpdate", email="test.auth.decoyupdate@example.invalid", role="Admin", status="Active")
     db_session.add_all([target, real_actor, decoy])
@@ -217,7 +217,7 @@ def test_user_put_ignores_actor_user_id_and_uses_authenticated_actor(api_client,
 
 def test_user_delete_ignores_actor_user_id_and_uses_authenticated_actor(api_client, db_session, act_as):
     """Covers items 10 and 13."""
-    target = User(name="Test Auth DeleteTarget", email="test.auth.deletetarget@example.invalid", role="Support Agent", status="Active")
+    target = User(name="Test Auth DeleteTarget", email="test.auth.deletetarget@example.invalid", role="SME", status="Active")
     real_actor = User(name="Test Auth RealActorDelete", email="test.auth.realactordelete@example.invalid", role="Admin", status="Active")
     decoy = User(name="Test Auth DecoyDelete", email="test.auth.decoydelete@example.invalid", role="Admin", status="Active")
     db_session.add_all([target, real_actor, decoy])
@@ -281,8 +281,8 @@ def test_auth_failure_does_not_expose_token_contents(raw_client):
 
 
 def test_require_roles_rejects_user_without_required_role():
-    dependency = require_roles("Admin", "Support Lead")
-    support_agent = CurrentUser(id=1, name="Test Auth SupportAgent", email="x@example.invalid", role="Support Agent", status="Active")
+    dependency = require_roles("Admin", "Admin")
+    support_agent = CurrentUser(id=1, name="Test Auth SupportAgent", email="x@example.invalid", role="SME", status="Active")
 
     with pytest.raises(ForbiddenError) as exc_info:
         dependency(current_user=support_agent)
@@ -292,7 +292,7 @@ def test_require_roles_rejects_user_without_required_role():
 
 
 def test_require_roles_allows_user_with_required_role():
-    dependency = require_roles("Admin", "Support Lead")
+    dependency = require_roles("Admin", "Admin")
     admin = CurrentUser(id=1, name="Test Auth Admin", email="x@example.invalid", role="Admin", status="Active")
 
     result = dependency(current_user=admin)

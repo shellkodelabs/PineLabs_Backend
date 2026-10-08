@@ -32,6 +32,8 @@ from app.schemas.common import PaginatedResponse
 from app.schemas.user import (
     CreateUserRequest,
     DeleteUserResponse,
+    ManageUserRequest,
+    ManageUserResponse,
     UpdateUserRequest,
     UserAccessResponse,
     UserResponse,
@@ -68,6 +70,29 @@ def list_users(
         sort_by=sortBy,
         sort_order=sortOrder,
     )
+
+
+@router.post("/manage", response_model=ManageUserResponse)
+def manage_user(
+    payload: ManageUserRequest,
+    actor: CurrentUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> ManageUserResponse:
+    """Consolidated CRUD endpoint — one route handling create, update,
+    and delete, selected by the request body's `operation` field. This is
+    an alternative to the dedicated POST/PUT/DELETE verbs (which remain
+    available); it delegates to the exact same service logic, so
+    validation, SOP-access resolution, audit logging, and transaction
+    semantics are identical.
+
+    Body shapes:
+      {"operation":"create","data":{...CreateUserRequest...}}
+      {"operation":"update","userId":N,"data":{...UpdateUserRequest...}}
+      {"operation":"delete","userId":N}
+
+    MUST be declared before GET /{userId} so "manage" isn't captured as a
+    user id."""
+    return user_service.manage_user(db, payload, actor_user_id=actor.id)
 
 
 @router.get("/{userId}", response_model=UserAccessResponse)

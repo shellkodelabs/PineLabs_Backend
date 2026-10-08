@@ -37,7 +37,7 @@ import app.services.audit_service as audit_service_module
 from app.models import Merchant, Revision, SopSheet, User
 
 
-def _make_user(db_session, *, name, email, mobile=None, role="Support Agent", status="Active"):
+def _make_user(db_session, *, name, email, mobile=None, role="SME", status="Active"):
     user = User(name=name, email=email, mobile=mobile, role=role, status=status)
     db_session.add(user)
     db_session.flush()
@@ -84,7 +84,7 @@ def test_create_user_creates_exactly_one_revision(api_client, db_session, act_as
     before = _count_revisions(db_session)
     resp = api_client.post(
         "/api/v1/users",
-        json={"name": "Test Audit NewUser", "email": "test.audit.newuser@example.invalid", "role": "Support Agent"},
+        json={"name": "Test Audit NewUser", "email": "test.audit.newuser@example.invalid", "role": "SME"},
     )
     assert resp.status_code == 201
     assert _count_revisions(db_session) == before + 1
@@ -97,7 +97,7 @@ def test_create_user_revision_has_correct_shape(api_client, db_session, act_as, 
     act_as(actor)
     resp = api_client.post(
         "/api/v1/users",
-        json={"name": "Test Audit ShapeCheck", "email": "test.audit.shapecheck@example.invalid", "role": "Support Agent"},
+        json={"name": "Test Audit ShapeCheck", "email": "test.audit.shapecheck@example.invalid", "role": "SME"},
     )
     new_id = resp.json()["id"]
 
@@ -107,7 +107,7 @@ def test_create_user_revision_has_correct_shape(api_client, db_session, act_as, 
     assert revision.entity_id == new_id
     assert revision.user_id == actor.id
     assert "Test Audit ShapeCheck" in revision.target_label
-    assert revision.metadata_ == {"role": "Support Agent", "status": "Invited"}
+    assert revision.metadata_ == {"role": "SME", "status": "Invited"}
     # no secrets/sensitive data — the model has no password field at
     # all, but explicitly confirm nothing password-like leaked into metadata
     assert "password" not in str(revision.metadata_).lower()
@@ -125,7 +125,7 @@ def test_create_and_revision_are_atomic(api_client, db_session, act_as, actor):
         json={
             "name": "Test Audit AtomicFail",
             "email": email,
-            "role": "Support Agent",
+            "role": "SME",
             "access": {"Totally Fake Merchant For Audit Atomic Test": ["block"]},
         },
     )
@@ -170,7 +170,7 @@ def test_update_change_description_accurately_describes_changed_fields(api_clien
     act_as(actor)
     target = _make_user(
         db_session, name="Test Audit ChangeDesc", email="test.audit.changedesc@example.invalid",
-        role="Support Agent", status="Invited",
+        role="SME", status="Invited",
     )
 
     single = api_client.put(f"/api/v1/users/{target.id}", json={"status": "Active"})
@@ -180,24 +180,24 @@ def test_update_change_description_accurately_describes_changed_fields(api_clien
 
     multi = api_client.put(
         f"/api/v1/users/{target.id}",
-        json={"role": "Support Lead", "status": "Inactive"},
+        json={"role": "Admin", "status": "Inactive"},
     )
     assert multi.status_code == 200
     revisions = _revisions_for_entity(db_session, "user", target.id)
     latest = max(revisions, key=lambda r: r.id)
-    assert latest.change_description == "Role changed from Support Agent to Support Lead; status changed from Active to Inactive"
+    assert latest.change_description == "Role changed from SME to Admin; status changed from Active to Inactive"
 
 
 def test_no_revision_when_nothing_actually_changes(api_client, db_session, act_as, actor):
     act_as(actor)
     target = _make_user(
         db_session, name="Test Audit NoChange", email="test.audit.nochange@example.invalid",
-        role="Support Agent", status="Active",
+        role="SME", status="Active",
     )
     before = _count_revisions(db_session)
 
     # resending the SAME current values — not a real change.
-    resp = api_client.put(f"/api/v1/users/{target.id}", json={"role": "Support Agent", "status": "Active"})
+    resp = api_client.put(f"/api/v1/users/{target.id}", json={"role": "SME", "status": "Active"})
     assert resp.status_code == 200
     assert _count_revisions(db_session) == before
     assert _revisions_for_entity(db_session, "user", target.id) == []
@@ -207,7 +207,7 @@ def test_update_and_revision_are_atomic(api_client, db_session, act_as, actor):
     act_as(actor)
     target = _make_user(
         db_session, name="Test Audit UpdateAtomic", email="test.audit.updateatomic@example.invalid",
-        role="Support Agent", status="Active",
+        role="SME", status="Active",
     )
     before = _count_revisions(db_session)
 
@@ -331,7 +331,7 @@ def test_revision_insertion_failure_rolls_back_user_creation(api_client, db_sess
     with pytest.raises(RuntimeError):
         api_client.post(
             "/api/v1/users",
-            json={"name": "Test Audit InjectCreate", "email": email, "role": "Support Agent"},
+            json={"name": "Test Audit InjectCreate", "email": email, "role": "SME"},
         )
 
     created = db_session.execute(select(User).where(User.email == email)).scalar_one_or_none()
@@ -372,7 +372,7 @@ def test_revisions_api_reflects_newly_created_audit_entry(api_client, act_as, ac
     act_as(actor)
     resp = api_client.post(
         "/api/v1/users",
-        json={"name": "Test Audit ViaRevisionsApi", "email": "test.audit.viarevisionsapi@example.invalid", "role": "Support Agent"},
+        json={"name": "Test Audit ViaRevisionsApi", "email": "test.audit.viarevisionsapi@example.invalid", "role": "SME"},
     )
     assert resp.status_code == 201
 

@@ -1,8 +1,17 @@
 """add bin custom columns
 
 Revision ID: e6dc40b5767e
-Revises: d7d98d726b0d
+Revises: c3d4e5f6a7b8
 Create Date: 2026-09-24 00:39:18.826542
+
+NOTE (history reconciliation): this migration's parent was changed from
+d7d98d726b0d ("create instances table") to c3d4e5f6a7b8 (the tip of the
+Instance Management branch) to linearize two divergent heads. The old
+parent d7d98d726b0d created an `instances` table with a `description`
+column that was SUPERSEDED by the consolidated f1a2b3c4d5e6 schema
+(`instances` with ticket_number + custom_fields, matching
+app/models/instance.py). d7d98d726b0d is now an unreferenced orphan and
+is never applied by `alembic upgrade head`.
 
 Dynamic/Custom Columns task — backs BinTable.jsx's "Add Column" feature.
 
@@ -31,7 +40,7 @@ from sqlalchemy.dialects import postgresql
 
 # revision identifiers, used by Alembic.
 revision: str = 'e6dc40b5767e'
-down_revision: Union[str, None] = 'd7d98d726b0d'
+down_revision: Union[str, None] = 'c3d4e5f6a7b8'
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 

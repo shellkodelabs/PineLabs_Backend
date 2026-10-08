@@ -37,6 +37,8 @@ from app.core.config import get_settings
 from app.core.database import SessionLocal
 from app.models import (
     BinRecord,
+    GiftCardBinRecord,
+    Instance,
     Merchant,
     Revision,
     SopColumn,
@@ -44,13 +46,16 @@ from app.models import (
     SopRow,
     SopSheet,
     User,
+    WalletBinRecord,
 )
 from app.seed.mock_data_loader import (
     DEFAULT_FRONTEND_DATA_DIR,
     REVISION_ENTITY_LABEL_MAP,
     LoadedMockData,
+    map_frontend_role,
     match_bin_issuers_to_merchants,
     resolve_revision_user_names,
+    revisions_importable,
     run_frontend_exporter,
     validate,
 )
@@ -58,6 +63,9 @@ from app.seed.mock_data_loader import (
 TABLES_IN_DEPENDENCY_ORDER = [
     "merchants",
     "bin_records",
+    "gift_card_bin_records",
+    "wallet_bin_records",
+    "instances",
     "sop_sheets",
     "sop_column_groups",
     "sop_columns",
@@ -110,10 +118,32 @@ def insert_merchants(session: Session, data: LoadedMockData) -> dict:
     return by_frontend_id
 
 
+import re
+
+# The legacy `bin_records` table's DB CHECK constraints. The frontend's
+# bulk generators can emit values that don't satisfy these (e.g.
+# String(400000 + i*137).slice(0,6) can yield fewer than 6 digits), so
+# rows are validated here and skipped rather than aborting the seed.
+_BIN_IIN_RE = re.compile(r"^[0-9]{6}$")
+_MERCHANT_PREFIX_RE = re.compile(r"^[0-9]{3}$")
+
+
 def insert_bin_records(session: Session, data: LoadedMockData, merchant_by_frontend_id: dict) -> dict:
-    """Inserts all BIN records. merchant_id is set ONLY where the issuer
-    name exactly (case-insensitively) matches an imported merchant name —
-    never forced, never guessed. Returns match/no-match counts."""
+    """Inserts legacy-shaped `bin_records` rows.
+
+    The frontend's binSeries was redesigned into two typed shapes (Gift
+    Card / Wallet — see insert_typed_bin_records), neither of which is the
+    old flat `bin_records` shape this table expects. Only rows that still
+    carry the legacy keys (cardProgramGroupName/binIin/merchantPrefix) AND
+    satisfy the table's format + within-table uniqueness constraints are
+    inserted; everything else is skipped and counted. In the current
+    dataset this typically inserts 0 rows, which is fine — the live Bin
+    Series feature reads the new typed tables, and this legacy table is
+    kept only for Dashboard/compat (see app/models/bin_record.py).
+
+    merchant_id is set ONLY where the issuer name exactly
+    (case-insensitively) matches an imported merchant name — never forced.
+    """
     bin_match_by_index = match_bin_issuers_to_merchants(data)
     merchant_id_by_name_lower = {
         m["name"].strip().lower(): merchant_by_frontend_id[m["id"]].id for m in data.merchants
@@ -121,7 +151,28 @@ def insert_bin_records(session: Session, data: LoadedMockData, merchant_by_front
 
     matched = 0
     unmatched = 0
+    inserted = 0
+    skipped = 0
+    seen_bin_prefix: set = set()
     for i, rec in enumerate(data.bin_series):
+        bin_iin = rec.get("binIin")
+        merchant_prefix = rec.get("merchantPrefix")
+        card_program_group_name = rec.get("cardProgramGroupName")
+
+        # Skip rows that aren't the legacy flat shape or would violate the
+        # table's CHECK/UNIQUE constraints.
+        if not (bin_iin and merchant_prefix and card_program_group_name):
+            skipped += 1
+            continue
+        if not (_BIN_IIN_RE.match(bin_iin) and _MERCHANT_PREFIX_RE.match(merchant_prefix)):
+            skipped += 1
+            continue
+        key = (bin_iin, merchant_prefix)
+        if key in seen_bin_prefix:
+            skipped += 1
+            continue
+        seen_bin_prefix.add(key)
+
         merchant_id = None
         if i in bin_match_by_index:
             merchant_id = merchant_id_by_name_lower[bin_match_by_index[i]]
@@ -131,14 +182,130 @@ def insert_bin_records(session: Session, data: LoadedMockData, merchant_by_front
         session.add(
             BinRecord(
                 issuer=rec["issuer"],
-                card_program_group_name=rec["cardProgramGroupName"],
-                bin_iin=rec["binIin"],
-                merchant_prefix=rec["merchantPrefix"],
+                card_program_group_name=card_program_group_name,
+                bin_iin=bin_iin,
+                merchant_prefix=merchant_prefix,
                 merchant_id=merchant_id,
             )
         )
+        inserted += 1
     session.flush()
-    return {"matched": matched, "unmatched": unmatched, "total": len(data.bin_series)}
+    return {
+        "matched": matched,
+        "unmatched": unmatched,
+        "inserted": inserted,
+        "skipped": skipped,
+        "total": len(data.bin_series),
+    }
+
+
+def insert_instances_from_bin_data(session: Session) -> dict:
+    """Create one `instances` row per DISTINCT instance name found on the
+    seeded BIN records (gift card + wallet).
+
+    The frontend's instances are mock-only (sopData.js assigns issuerIds
+    client-side); there is no instances dataset to import. But the BIN
+    data DOES carry real instance names (e.g. "North Zone"), and the new
+    GET /instances/{id}/issuers endpoint derives an instance's issuers
+    from exactly those BIN rows. Seeding the instances table from the
+    distinct BIN instance names makes Instance Management and the Create
+    User instance->issuer drill-down work against real data, with each
+    instance's name matching the BIN `instance` strings so the issuer
+    query resolves. Must run AFTER the BIN inserts (reads their values).
+    status defaults to Active; no ticket/custom fields (none in source).
+    """
+    names = session.execute(
+        text(
+            "SELECT DISTINCT instance FROM ("
+            "  SELECT instance FROM gift_card_bin_records"
+            "  UNION SELECT instance FROM wallet_bin_records"
+            ") x ORDER BY instance"
+        )
+    ).scalars().all()
+
+    for name in names:
+        session.add(Instance(name=name, status="Active"))
+    session.flush()
+    return {"inserted": len(names)}
+
+
+def insert_typed_bin_records(session: Session, data: LoadedMockData) -> dict:
+    """Splits the redesigned binSeries into the two new typed tables
+    (gift_card_bin_records / wallet_bin_records) by each row's `binType`.
+
+    These tables match the current frontend/client Excel shape exactly.
+    Every business field is NOT NULL, and bin_iin/merchant_prefix must
+    satisfy the same ^[0-9]{6}$ / ^[0-9]{3}$ CHECKs plus a within-table
+    UNIQUE(bin_iin, merchant_prefix). The frontend's bulk generators can
+    emit malformed/duplicate values, so invalid or colliding rows are
+    skipped and counted rather than aborting the whole seed.
+    """
+    gc_inserted = wallet_inserted = 0
+    gc_skipped = wallet_skipped = 0
+    gc_seen: set = set()
+    wallet_seen: set = set()
+
+    def _valid(bin_iin, merchant_prefix, seen) -> bool:
+        if not (bin_iin and merchant_prefix):
+            return False
+        if not (_BIN_IIN_RE.match(bin_iin) and _MERCHANT_PREFIX_RE.match(merchant_prefix)):
+            return False
+        key = (bin_iin, merchant_prefix)
+        if key in seen:
+            return False
+        seen.add(key)
+        return True
+
+    for rec in data.bin_series:
+        bin_type = rec.get("binType")
+        bin_iin = rec.get("binIin")
+        merchant_prefix = rec.get("merchantPrefix")
+
+        if bin_type == "giftCard":
+            if not _valid(bin_iin, merchant_prefix, gc_seen):
+                gc_skipped += 1
+                continue
+            session.add(
+                GiftCardBinRecord(
+                    instance=rec["instance"],
+                    issuer=rec["issuer"],
+                    merchant=rec["merchant"],
+                    card_program_group_name=rec["cardProgramGroupName"],
+                    bin_iin=bin_iin,
+                    merchant_prefix=merchant_prefix,
+                    card_program_group_type=rec["cardProgramGroupType"],
+                    card_type=rec["cardType"],
+                    ticket_number=rec["ticketNumber"],
+                    status=rec.get("status", "Active"),
+                )
+            )
+            gc_inserted += 1
+        elif bin_type == "wallet":
+            if not _valid(bin_iin, merchant_prefix, wallet_seen):
+                wallet_skipped += 1
+                continue
+            session.add(
+                WalletBinRecord(
+                    instance=rec["instance"],
+                    issuer=rec["issuer"],
+                    merchant=rec["merchant"],
+                    wallet_program_name=rec["walletProgramName"],
+                    bin_iin=bin_iin,
+                    merchant_prefix=merchant_prefix,
+                    wallet_program_group_type=rec["walletProgramGroupType"],
+                    ticket_number=rec["ticketNumber"],
+                    status=rec.get("status", "Active"),
+                )
+            )
+            wallet_inserted += 1
+
+    session.flush()
+    return {
+        "gift_card_inserted": gc_inserted,
+        "gift_card_skipped": gc_skipped,
+        "wallet_inserted": wallet_inserted,
+        "wallet_skipped": wallet_skipped,
+    }
 
 
 def _build_sheet(sheet_data: dict, merchant_id) -> SopSheet:
@@ -191,13 +358,15 @@ def insert_sop_data(session: Session, data: LoadedMockData, merchant_by_frontend
 
 def insert_users(session: Session, data: LoadedMockData) -> dict:
     """
-    Maps name/email/role/status directly. mobile is left NULL — the
-    frontend's users.js has no `mobile` field at all (only
-    id/name/email/role/status/lastActive). last_active_at is left NULL
-    for every user — `lastActive` in the source is a relative display
-    string ("2 min ago", "1 hr ago", "—") with no captured reference
-    timestamp, so it cannot be safely converted into an absolute
-    TIMESTAMPTZ without inventing a value.
+    Maps name/email/status directly and role via map_frontend_role (the
+    temporary Option A reconciliation defined in mock_data_loader). mobile
+    is left NULL — the frontend's users.js
+    has no `mobile` field at all (only id/name/email/role/status/
+    lastActive). last_active_at is left NULL for every user —
+    `lastActive` in the source is a relative display string ("2 min ago",
+    "1 hr ago", "—") with no captured reference timestamp, so it cannot
+    be safely converted into an absolute TIMESTAMPTZ without inventing a
+    value.
     """
     by_frontend_id = {}
     for u in data.users:
@@ -205,7 +374,7 @@ def insert_users(session: Session, data: LoadedMockData) -> dict:
             name=u["name"],
             email=u["email"],
             mobile=None,
-            role=u["role"],
+            role=map_frontend_role(u["role"]),
             status=u["status"],
             last_active_at=None,
         )
@@ -261,7 +430,7 @@ def insert_revisions(session: Session, data: LoadedMockData, user_by_frontend_id
     return count
 
 
-def print_report(data: LoadedMockData, warnings: list, bin_stats: dict, sop_stats: dict, revision_count: int, session: Session) -> None:
+def print_report(data: LoadedMockData, warnings: list, bin_stats: dict, typed_bin_stats: dict, sop_stats: dict, revision_count: int, session: Session) -> None:
     def count(sql: str) -> int:
         return session.execute(text(sql)).scalar_one()
 
@@ -269,11 +438,21 @@ def print_report(data: LoadedMockData, warnings: list, bin_stats: dict, sop_stat
     print("PINELAB MOCK DATA IMPORT — RECONCILIATION REPORT")
     print("=" * 70)
 
-    print("\n--- BIN Series ---")
+    print("\n--- BIN Series (legacy compat table `bin_records`) ---")
     print(f"source count:            {len(data.bin_series)}")
+    print(f"inserted (legacy):       {bin_stats['inserted']}")
+    print(f"skipped (not legacy shape / invalid / dup): {bin_stats['skipped']}")
     print(f"database count:          {count('SELECT count(*) FROM bin_records')}")
     print(f"matched to a merchant:   {bin_stats['matched']}")
     print(f"unmatched (merchant_id NULL): {bin_stats['unmatched']}")
+
+    print("\n--- BIN Series (typed tables) ---")
+    print(f"gift card inserted:      {typed_bin_stats['gift_card_inserted']} "
+          f"(skipped {typed_bin_stats['gift_card_skipped']})")
+    print(f"gift card database count:{count('SELECT count(*) FROM gift_card_bin_records')}")
+    print(f"wallet inserted:         {typed_bin_stats['wallet_inserted']} "
+          f"(skipped {typed_bin_stats['wallet_skipped']})")
+    print(f"wallet database count:   {count('SELECT count(*) FROM wallet_bin_records')}")
 
     print("\n--- Merchants ---")
     print(f"source count:            {len(data.merchants)}")
@@ -357,8 +536,15 @@ def main() -> int:
             print("Importing merchants...")
             merchant_by_frontend_id = insert_merchants(session, data)
 
-            print("Importing BIN records...")
+            print("Importing legacy BIN records (compat table)...")
             bin_stats = insert_bin_records(session, data, merchant_by_frontend_id)
+
+            print("Importing typed BIN records (gift card / wallet)...")
+            typed_bin_stats = insert_typed_bin_records(session, data)
+
+            print("Importing instances (from distinct BIN instance names)...")
+            instance_stats = insert_instances_from_bin_data(session)
+            print(f"  -> {instance_stats['inserted']} instances")
 
             print("Importing SOP sheets/groups/columns/rows (this is the bulk of the data)...")
             sop_stats = insert_sop_data(session, data, merchant_by_frontend_id)
@@ -368,11 +554,20 @@ def main() -> int:
 
             print("Skipping user_sop_sheet_access: no access data exists in the frontend source (see README).")
 
-            print("Importing revisions...")
-            revision_count = insert_revisions(session, data, user_by_frontend_id)
+            if revisions_importable(data):
+                print("Importing revisions...")
+                revision_count = insert_revisions(session, data, user_by_frontend_id)
+            else:
+                revision_count = 0
+                print(
+                    "Skipping revisions: the frontend's revisions.js has been redesigned and no "
+                    "longer carries the backend-contract fields (type/entity/user/timestamp/"
+                    "target/change). The Revision History screen still reads that mock data "
+                    "directly and is not wired to /api/v1/revisions, so nothing consumes these rows yet."
+                )
 
         # session.begin() context has committed by this point.
-        print_report(data, validation.warnings, bin_stats, sop_stats, revision_count, session)
+        print_report(data, validation.warnings, bin_stats, typed_bin_stats, sop_stats, revision_count, session)
 
     print("\nImport complete.")
     return 0
