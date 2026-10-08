@@ -90,14 +90,10 @@ class Instance(Base):
     # relate to more than one instance.
     ticket_number: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
 
-    # Audit trail for who revised the instance and who reviewed that
-    # change — captured alongside the ticket number on every create/edit
-    # from the Instance Management UI (the form makes both mandatory).
-    # Stored nullable at the DB level so pre-existing rows (and the
-    # import path, which doesn't collect them) don't break; the API's
-    # create schema enforces presence for interactive add/edit.
-    revised_by: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
-    reviewer: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    # NOTE: Revised By / Reviewer are NOT stored on the instance row. They
+    # are an EDIT/DELETE audit concern only — each edit is recorded in
+    # `instance_edits` and each deletion in `instance_deletions`. Create
+    # and import never capture them.
 
     # Nullable FK, ON DELETE SET NULL — see module docstring. Set to the
     # acting user on create and on every update, so the UI's "UPDATED BY"
@@ -334,3 +330,49 @@ class InstanceDeletion(Base):
 
     def __repr__(self) -> str:  # pragma: no cover - debugging aid only
         return f"<InstanceDeletion id={self.id} instance_id={self.instance_id} name={self.instance_name!r}>"
+
+
+class InstanceEdit(Base):
+    """
+    Audit record of an EDIT to an instance.
+
+    Every edit path — the Edit Instance form, an inline cell edit, and the
+    Activate/Deactivate toggle — captures a ticket plus who revised and
+    who reviewed the change. Rather than stamp those onto the instance row
+    (which would only keep the LATEST), each edit is appended here as its
+    own immutable row, giving a full edit history. Write-only audit trail,
+    kept separate from the shared `revisions` log (Instance Management is
+    intentionally decoupled). Mirrors InstanceDeletion.
+
+    `edited_by_user_id` is a NULLABLE FK ON DELETE SET NULL so removing a
+    user later clears attribution without breaking the audit row.
+    """
+
+    __tablename__ = "instance_edits"
+    __table_args__ = (
+        Index("ix_instance_edits_instance_id", "instance_id"),
+        Index("ix_instance_edits_edited_at", text("edited_at DESC")),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(always=True), primary_key=True)
+
+    # The edited instance's id and name (name captured at edit time).
+    instance_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    instance_name: Mapped[str] = mapped_column(String(255), nullable=False)
+
+    # Audit trail captured in the edit dialog (all mandatory).
+    ticket_number: Mapped[str] = mapped_column(String(100), nullable=False)
+    revised_by: Mapped[str] = mapped_column(String(255), nullable=False)
+    reviewer: Mapped[str] = mapped_column(String(255), nullable=False)
+
+    edited_by_user_id: Mapped[Optional[int]] = mapped_column(
+        BigInteger, ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    edited_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    edited_by_user: Mapped[Optional["User"]] = relationship(foreign_keys=[edited_by_user_id])
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid only
+        return f"<InstanceEdit id={self.id} instance_id={self.instance_id} name={self.instance_name!r}>"

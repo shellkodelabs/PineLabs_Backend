@@ -342,8 +342,6 @@ def download_import_template(db: Session = Depends(get_db)) -> StreamingResponse
     headers = [
         instance_service.IMPORT_COLUMN_INSTANCE,
         instance_service.IMPORT_COLUMN_TICKET,
-        instance_service.IMPORT_COLUMN_REVISED_BY,
-        instance_service.IMPORT_COLUMN_REVIEWER,
         instance_service.IMPORT_COLUMN_STATUS,
     ] + [c.label for c in columns]
 

@@ -48,7 +48,9 @@ from app.schemas.instance import (
 )
 from app.services import instance_column_service
 
-# (request field, model attribute) — the fields an update may change.
+# (request field, model attribute) — the fields an update may change on
+# the instance ROW. Revised By / Reviewer are NOT here: they are not
+# stored on the row, only in the instance_edits audit table.
 _UPDATABLE_FIELDS = [
     ("name", "name"),
     ("status", "status"),
@@ -57,10 +59,6 @@ _UPDATABLE_FIELDS = [
     # None, this partial-update convention means it can be SET/changed
     # but not cleared back to null through this endpoint.
     ("ticketNumber", "ticket_number"),
-    # Audit trail — set on create and changeable on edit (partial update
-    # skips omitted/None values, same convention as ticketNumber).
-    ("revisedBy", "revised_by"),
-    ("reviewer", "reviewer"),
 ]
 
 _DEFAULT_STATUS = "Active"
@@ -78,8 +76,6 @@ def _to_response(instance: Instance) -> InstanceResponse:
         issuerCount=_ISSUER_COUNT_PLACEHOLDER,
         status=instance.status,
         ticketNumber=instance.ticket_number,
-        revisedBy=instance.revised_by,
-        reviewer=instance.reviewer,
         customFields=instance.custom_fields or {},
         updatedBy=instance.updated_by_user.name if instance.updated_by_user else None,
         updatedAt=instance.updated_at,
@@ -152,8 +148,6 @@ def create_instance(db: Session, payload: CreateInstanceRequest, *, actor_user_i
                 name=name,
                 status=status,
                 ticket_number=payload.ticketNumber,  # already normalized (blank -> None) by the schema
-                revised_by=payload.revisedBy,  # mandatory, non-blank (schema-enforced)
-                reviewer=payload.reviewer,  # mandatory, non-blank (schema-enforced)
                 updated_by_user_id=actor_user_id,
                 custom_fields=custom_fields,
             )
@@ -207,13 +201,41 @@ def update_instance(
     if not fields_to_set:
         return _to_response(instance)
 
-    # A real write is happening — attribute it to the acting user so the
-    # UI's "UPDATED BY" column reflects who last touched the instance.
+    # A real edit is happening. Every edit path (edit form, inline cell
+    # edit, activate/deactivate) must supply the audit trail: a ticket
+    # plus who revised and who reviewed the change. These are recorded in
+    # the instance_edits audit table — NOT stored on the instance row.
+    missing_audit = []
+    if not (payload.ticketNumber and payload.ticketNumber.strip()):
+        missing_audit.append("ticketNumber")
+    if not (payload.revisedBy and payload.revisedBy.strip()):
+        missing_audit.append("revisedBy")
+    if not (payload.reviewer and payload.reviewer.strip()):
+        missing_audit.append("reviewer")
+    if missing_audit:
+        raise ValidationError(
+            f"An edit requires: {', '.join(missing_audit)}.",
+            code="INSTANCE_EDIT_AUDIT_REQUIRED",
+            details={"missing": missing_audit},
+        )
+
+    # Attribute the row's "UPDATED BY" to the acting user.
     fields_to_set["updated_by_user_id"] = actor_user_id
 
     try:
         with db.begin_nested():
             instance_repository.update_fields(db, instance, **fields_to_set)
+            # Append the immutable edit-audit row (ticket + revised by +
+            # reviewer), in the same savepoint as the edit itself.
+            instance_repository.create_edit(
+                db,
+                instance_id=instance.id,
+                instance_name=instance.name,
+                ticket_number=payload.ticketNumber.strip(),
+                revised_by=payload.revisedBy.strip(),
+                reviewer=payload.reviewer.strip(),
+                edited_by_user_id=actor_user_id,
+            )
     except IntegrityError as exc:
         raise ConflictError(
             f"An instance already exists with name={instance.name!r}.",
@@ -275,31 +297,18 @@ def build_export(
     db: Session, *, search: Optional[str] = None, status: Optional[str] = None
 ) -> Tuple[List[str], List[List[str]]]:
     """Returns (headers, rows) for the export file: the fixed columns
-    (Instance, Ticket Number, Revised By, Reviewer, Status) followed by
-    every custom column's label in display order. Each row's cells align
-    to those headers, with custom values pulled from the instance's
-    custom_fields (missing -> blank). The header labels double as the
-    accepted import headers."""
+    (Instance, Ticket Number, Status) followed by every custom column's
+    label in display order. Each row's cells align to those headers, with
+    custom values pulled from the instance's custom_fields (missing ->
+    blank). The header labels double as the accepted import headers."""
     columns = instance_column_repository.list_all(db)
-    headers = [
-        IMPORT_COLUMN_INSTANCE,
-        IMPORT_COLUMN_TICKET,
-        IMPORT_COLUMN_REVISED_BY,
-        IMPORT_COLUMN_REVIEWER,
-        IMPORT_COLUMN_STATUS,
-    ] + [c.label for c in columns]
+    headers = [IMPORT_COLUMN_INSTANCE, IMPORT_COLUMN_TICKET, IMPORT_COLUMN_STATUS] + [c.label for c in columns]
 
     instances = instance_repository.list_for_export(db, search=search, status=status)
     rows: List[List[str]] = []
     for inst in instances:
         cf = inst.custom_fields or {}
-        row = [
-            inst.name,
-            inst.ticket_number or "",
-            inst.revised_by or "",
-            inst.reviewer or "",
-            inst.status,
-        ]
+        row = [inst.name, inst.ticket_number or "", inst.status]
         row.extend("" if cf.get(c.key) is None else str(cf.get(c.key)) for c in columns)
         rows.append(row)
     return headers, rows
@@ -327,16 +336,10 @@ def build_export(
 IMPORT_COLUMN_INSTANCE = "Instance"
 IMPORT_COLUMN_TICKET = "Ticket Number"
 IMPORT_COLUMN_STATUS = "Status"
-IMPORT_COLUMN_REVISED_BY = "Revised By"
-IMPORT_COLUMN_REVIEWER = "Reviewer"
-# Instance, Ticket Number, Revised By and Reviewer are all REQUIRED (the
-# same audit fields a manual add/edit requires). Status stays optional.
-IMPORT_REQUIRED_COLUMNS = (
-    IMPORT_COLUMN_INSTANCE,
-    IMPORT_COLUMN_TICKET,
-    IMPORT_COLUMN_REVISED_BY,
-    IMPORT_COLUMN_REVIEWER,
-)
+# Import does NOT capture Revised By / Reviewer (those are an edit/delete
+# audit concern only). Instance and Ticket Number are REQUIRED; Status
+# is optional.
+IMPORT_REQUIRED_COLUMNS = (IMPORT_COLUMN_INSTANCE, IMPORT_COLUMN_TICKET)
 
 def _is_missing(value: object) -> bool:
     """True ONLY when the cell is empty or whitespace-only. The sole
@@ -384,15 +387,9 @@ def expected_import_columns(db: Session) -> Tuple[List[str], List[str]]:
     real system columns rather than against whatever the first sheet
     happened to contain (which may itself be wrong)."""
     custom_columns = instance_column_repository.list_all(db)
-    all_labels = [
-        IMPORT_COLUMN_INSTANCE,
-        IMPORT_COLUMN_TICKET,
-        IMPORT_COLUMN_REVISED_BY,
-        IMPORT_COLUMN_REVIEWER,
-        IMPORT_COLUMN_STATUS,
-    ]
+    all_labels = [IMPORT_COLUMN_INSTANCE, IMPORT_COLUMN_TICKET, IMPORT_COLUMN_STATUS]
     all_labels += [c.label for c in custom_columns]
-    required = [IMPORT_COLUMN_INSTANCE, IMPORT_COLUMN_TICKET, IMPORT_COLUMN_REVISED_BY, IMPORT_COLUMN_REVIEWER]
+    required = [IMPORT_COLUMN_INSTANCE, IMPORT_COLUMN_TICKET]
     required += [c.label for c in custom_columns if c.required]
     return all_labels, required
 
@@ -444,8 +441,6 @@ def import_instances(
     """
     instance_col = _find_header(headers, IMPORT_COLUMN_INSTANCE)
     ticket_col = _find_header(headers, IMPORT_COLUMN_TICKET)
-    revised_by_col = _find_header(headers, IMPORT_COLUMN_REVISED_BY)
-    reviewer_col = _find_header(headers, IMPORT_COLUMN_REVIEWER)
     status_col = _find_header(headers, IMPORT_COLUMN_STATUS)  # optional
 
     missing = []
@@ -453,10 +448,6 @@ def import_instances(
         missing.append(IMPORT_COLUMN_INSTANCE)
     if ticket_col is None:
         missing.append(IMPORT_COLUMN_TICKET)
-    if revised_by_col is None:
-        missing.append(IMPORT_COLUMN_REVISED_BY)
-    if reviewer_col is None:
-        missing.append(IMPORT_COLUMN_REVIEWER)
     if missing:
         raise ValidationError(
             f"Import file is missing required column(s): {', '.join(missing)}. "
@@ -497,8 +488,8 @@ def import_instances(
             code="IMPORT_EMPTY",
         )
 
-    # (location_label, name, ticket, revised_by, reviewer, status, raw_custom_by_key)
-    parsed: List[Tuple[str, str, str, str, str, str, dict]] = []
+    # (location_label, name, ticket, status, raw_custom_by_key)
+    parsed: List[Tuple[str, str, str, str, dict]] = []
     seen_names: dict = {}  # lower(name) -> first occurrence's location label
 
     for offset, raw in enumerate(rows):
@@ -516,8 +507,6 @@ def import_instances(
 
         name_cell = raw[instance_col] if instance_col < len(raw) else None
         ticket_cell = raw[ticket_col] if ticket_col < len(raw) else None
-        revised_by_cell = raw[revised_by_col] if revised_by_col < len(raw) else None
-        reviewer_cell = raw[reviewer_col] if reviewer_col < len(raw) else None
         status_cell = raw[status_col] if status_col is not None and status_col < len(raw) else None
 
         row_ok = True
@@ -527,19 +516,11 @@ def import_instances(
         if _is_missing(ticket_cell):
             errors.append(f"{loc_prefix}: '{IMPORT_COLUMN_TICKET}' must not be empty.")
             row_ok = False
-        if _is_blank_only(revised_by_cell):
-            errors.append(f"{loc_prefix}: '{IMPORT_COLUMN_REVISED_BY}' must not be empty.")
-            row_ok = False
-        if _is_blank_only(reviewer_cell):
-            errors.append(f"{loc_prefix}: '{IMPORT_COLUMN_REVIEWER}' must not be empty.")
-            row_ok = False
         if not row_ok:
             continue
 
         name = str(name_cell).strip()
         ticket = str(ticket_cell).strip()
-        revised_by = str(revised_by_cell).strip()
-        reviewer = str(reviewer_cell).strip()
         status = _parse_import_status(status_cell)
 
         # Raw custom values for this row, keyed by column key — ONLY the
@@ -573,7 +554,7 @@ def import_instances(
             )
             continue
         seen_names[name.lower()] = loc
-        parsed.append((loc, name, ticket, revised_by, reviewer, status, coerced_custom))
+        parsed.append((loc, name, ticket, status, coerced_custom))
 
     if errors:
         raise ValidationError(
@@ -600,7 +581,7 @@ def import_instances(
             for inst in instance_repository.list_by_names(db, [p[1] for p in parsed])
         }
         new_instances: List[Instance] = []
-        for _loc, name, ticket, revised_by, reviewer, status, coerced_custom in parsed:
+        for _loc, name, ticket, status, coerced_custom in parsed:
             instance = existing_by_name.get(name.strip().lower())
             if instance is None:
                 # New instance: fill EVERY custom column — the ones from
@@ -615,8 +596,6 @@ def import_instances(
                         name=name,
                         status=status,
                         ticket_number=ticket,
-                        revised_by=revised_by,
-                        reviewer=reviewer,
                         updated_by_user_id=actor_user_id,
                         custom_fields=full_custom,
                     )
@@ -626,12 +605,6 @@ def import_instances(
                 changes = False
                 if instance.ticket_number != ticket:
                     instance.ticket_number = ticket
-                    changes = True
-                if instance.revised_by != revised_by:
-                    instance.revised_by = revised_by
-                    changes = True
-                if instance.reviewer != reviewer:
-                    instance.reviewer = reviewer
                     changes = True
                 if instance.status != status:
                     instance.status = status
@@ -749,8 +722,6 @@ def validate_file_sheets(
         headers = sheet.headers
         instance_col = _find_header(headers, IMPORT_COLUMN_INSTANCE)
         ticket_col = _find_header(headers, IMPORT_COLUMN_TICKET)
-        revised_by_col = _find_header(headers, IMPORT_COLUMN_REVISED_BY)
-        reviewer_col = _find_header(headers, IMPORT_COLUMN_REVIEWER)
         status_col = _find_header(headers, IMPORT_COLUMN_STATUS)
 
         # Resolve custom column header positions (present columns only);
@@ -769,16 +740,12 @@ def validate_file_sheets(
         # If the built-in required columns aren't resolvable (shouldn't
         # happen once the parser aligned to canonical order, but guard
         # anyway), record and skip row processing for this sheet.
-        if instance_col is None or ticket_col is None or revised_by_col is None or reviewer_col is None:
+        if instance_col is None or ticket_col is None:
             missing = []
             if instance_col is None:
                 missing.append(IMPORT_COLUMN_INSTANCE)
             if ticket_col is None:
                 missing.append(IMPORT_COLUMN_TICKET)
-            if revised_by_col is None:
-                missing.append(IMPORT_COLUMN_REVISED_BY)
-            if reviewer_col is None:
-                missing.append(IMPORT_COLUMN_REVIEWER)
             sv.errors.append(
                 {"row": None, "messages": [f"missing required column(s): {', '.join(missing)}."]}
             )
@@ -801,8 +768,6 @@ def validate_file_sheets(
 
             name_cell = raw[instance_col] if instance_col < len(raw) else None
             ticket_cell = raw[ticket_col] if ticket_col < len(raw) else None
-            revised_by_cell = raw[revised_by_col] if revised_by_col < len(raw) else None
-            reviewer_cell = raw[reviewer_col] if reviewer_col < len(raw) else None
             status_cell = raw[status_col] if status_col is not None and status_col < len(raw) else None
 
             name_missing = _is_missing(name_cell)
@@ -810,10 +775,6 @@ def validate_file_sheets(
                 messages.append(f"'{IMPORT_COLUMN_INSTANCE}' must not be empty.")
             if _is_missing(ticket_cell):
                 messages.append(f"'{IMPORT_COLUMN_TICKET}' must not be empty.")
-            if _is_blank_only(revised_by_cell):
-                messages.append(f"'{IMPORT_COLUMN_REVISED_BY}' must not be empty.")
-            if _is_blank_only(reviewer_cell):
-                messages.append(f"'{IMPORT_COLUMN_REVIEWER}' must not be empty.")
 
             # Validate custom columns present in this sheet's header,
             # collecting ALL their messages (required-missing, datatype
@@ -847,10 +808,8 @@ def validate_file_sheets(
             # Row is fully valid — stage it for the write.
             name = str(name_cell).strip()
             ticket = str(ticket_cell).strip()
-            revised_by = str(revised_by_cell).strip()
-            reviewer = str(reviewer_cell).strip()
             status = _parse_import_status(status_cell)
-            sv.parsed.append((name, ticket, revised_by, reviewer, status, coerced_custom))
+            sv.parsed.append((name, ticket, status, coerced_custom))
 
         result.sheets.append(sv)
 
@@ -905,7 +864,7 @@ def write_one_sheet(
             for inst in instance_repository.list_by_names(db, [p[0] for p in sv.parsed])
         }
         new_instances: List[Instance] = []
-        for name, ticket, revised_by, reviewer, status, coerced_custom in sv.parsed:
+        for name, ticket, status, coerced_custom in sv.parsed:
             instance = existing_by_name.get(name.strip().lower())
             if instance is None:
                 full_custom = instance_column_service.coerce_and_validate_custom_fields(
@@ -916,8 +875,6 @@ def write_one_sheet(
                         name=name,
                         status=status,
                         ticket_number=ticket,
-                        revised_by=revised_by,
-                        reviewer=reviewer,
                         updated_by_user_id=actor_user_id,
                         custom_fields=full_custom,
                     )
@@ -927,12 +884,6 @@ def write_one_sheet(
                 changes = False
                 if instance.ticket_number != ticket:
                     instance.ticket_number = ticket
-                    changes = True
-                if instance.revised_by != revised_by:
-                    instance.revised_by = revised_by
-                    changes = True
-                if instance.reviewer != reviewer:
-                    instance.reviewer = reviewer
                     changes = True
                 if instance.status != status:
                     instance.status = status

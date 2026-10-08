@@ -21,7 +21,7 @@ from typing import List, Optional, Tuple
 from sqlalchemy import asc, desc, func, or_, select
 from sqlalchemy.orm import Session, joinedload
 
-from app.models.instance import Instance, InstanceDeletion
+from app.models.instance import Instance, InstanceDeletion, InstanceEdit
 
 # Maps the API's camelCase sortBy values to actual ORM columns.
 SORT_FIELD_MAP = {
@@ -101,15 +101,11 @@ def create(
     ticket_number: Optional[str],
     updated_by_user_id: Optional[int],
     custom_fields: Optional[dict] = None,
-    revised_by: Optional[str] = None,
-    reviewer: Optional[str] = None,
 ) -> Instance:
     instance = Instance(
         name=name,
         status=status,
         ticket_number=ticket_number,
-        revised_by=revised_by,
-        reviewer=reviewer,
         updated_by_user_id=updated_by_user_id,
         custom_fields=custom_fields or {},
     )
@@ -148,6 +144,31 @@ def create_deletion(
         revised_by=revised_by,
         reviewer=reviewer,
         deleted_by_user_id=deleted_by_user_id,
+    )
+    session.add(record)
+    session.flush()
+    return record
+
+
+def create_edit(
+    session: Session,
+    *,
+    instance_id: int,
+    instance_name: str,
+    ticket_number: str,
+    revised_by: str,
+    reviewer: str,
+    edited_by_user_id: Optional[int],
+) -> InstanceEdit:
+    """Record an instance-edit audit row (write-only trail). One row per
+    edit, so the full edit history is preserved."""
+    record = InstanceEdit(
+        instance_id=instance_id,
+        instance_name=instance_name,
+        ticket_number=ticket_number,
+        revised_by=revised_by,
+        reviewer=reviewer,
+        edited_by_user_id=edited_by_user_id,
     )
     session.add(record)
     session.flush()

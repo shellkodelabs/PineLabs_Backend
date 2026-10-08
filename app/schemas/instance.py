@@ -63,8 +63,6 @@ class InstanceResponse(BaseModel):
     issuerCount: int = 0
     status: str
     ticketNumber: Optional[str] = None
-    revisedBy: Optional[str] = None
-    reviewer: Optional[str] = None
     # Values for the user-defined custom columns, keyed by column key
     # (see InstanceColumn). Always present (possibly empty).
     customFields: Dict[str, Any] = Field(default_factory=dict)
@@ -79,11 +77,9 @@ class CreateInstanceRequest(BaseModel):
     ticketNumber: Optional[str] = Field(
         None, max_length=100, description="Optional reference ticket, e.g. 'INC1234'."
     )
-    # Audit trail — mandatory on an interactive create (the Instance
-    # Management form requires both). Enforced non-blank by the validator
-    # below; stored on the instance row for the audit trail.
-    revisedBy: str = Field(..., min_length=1, max_length=255, description="Who revised the instance.")
-    reviewer: str = Field(..., min_length=1, max_length=255, description="Who reviewed the change.")
+    # NOTE: create does NOT capture Revised By / Reviewer — those are an
+    # EDIT/DELETE audit concern only (see UpdateInstanceRequest and the
+    # instance_edits / instance_deletions audit tables).
     # Values for custom columns, keyed by column key. Validated/coerced
     # against the column definitions by the service layer (required cols
     # enforced; skipped optional cols default to their default/NA).
@@ -98,16 +94,6 @@ class CreateInstanceRequest(BaseModel):
     @classmethod
     def _normalize_optional(cls, value: Optional[str]) -> Optional[str]:
         return _normalize_optional_text(value)
-
-    @field_validator("revisedBy")
-    @classmethod
-    def _validate_revised_by(cls, value: str) -> str:
-        return _reject_blank(value, "revisedBy")
-
-    @field_validator("reviewer")
-    @classmethod
-    def _validate_reviewer(cls, value: str) -> str:
-        return _reject_blank(value, "reviewer")
 
 
 class UpdateInstanceRequest(BaseModel):
