@@ -64,7 +64,8 @@ class Settings(BaseSettings):
     # the feature works out-of-the-box; override per-environment in .env.
     #
     # IMPORT_MAX_FILES: reject an upload that carries more than this many
-    #   files, so a single request can't spawn an unbounded job.
+    #   files. 0 (the default) means NO LIMIT — any number of files is
+    #   accepted. Set a positive number to re-impose a per-request cap.
     # IMPORT_MAX_UPLOAD_BYTES: reject the request if the combined size of
     #   all uploaded files exceeds this (default 100 MB). Guards memory and
     #   temp-disk usage.
@@ -78,7 +79,7 @@ class Settings(BaseSettings):
     # NOTE: a job's files are always processed SEQUENTIALLY (one at a time)
     # — a parallel/concurrency mode was prototyped and removed for now, so
     # there is deliberately no worker-mode/concurrency setting here.
-    IMPORT_MAX_FILES: int = 20
+    IMPORT_MAX_FILES: int = 0  # 0 = unlimited
     IMPORT_MAX_UPLOAD_BYTES: int = 100 * 1024 * 1024
     IMPORT_TEMP_DIR: str = ""
     IMPORT_JOB_RETENTION_MINUTES: int = 1440

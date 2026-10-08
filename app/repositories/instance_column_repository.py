@@ -15,6 +15,7 @@ from app.models.instance import (
     Instance,
     InstanceBuiltinColumn,
     InstanceColumn,
+    InstanceColumnDeletion,
 )
 
 
@@ -101,6 +102,9 @@ def create(
     options: Optional[list],
     sort_order: int,
     after_key: Optional[str] = None,
+    ticket_number: Optional[str] = None,
+    revised_by: Optional[str] = None,
+    reviewer: Optional[str] = None,
 ) -> InstanceColumn:
     column = InstanceColumn(
         key=key,
@@ -111,6 +115,9 @@ def create(
         options=options,
         sort_order=sort_order,
         after_key=after_key,
+        ticket_number=ticket_number,
+        revised_by=revised_by,
+        reviewer=reviewer,
     )
     session.add(column)
     session.flush()
@@ -127,6 +134,30 @@ def update_fields(session: Session, column: InstanceColumn, **fields) -> Instanc
 def delete(session: Session, column: InstanceColumn) -> None:
     session.delete(column)
     session.flush()
+
+
+def create_deletion(
+    session: Session,
+    *,
+    column_key: str,
+    column_label: str,
+    ticket_number: str,
+    revised_by: str,
+    reviewer: str,
+    deleted_by_user_id: Optional[int],
+) -> InstanceColumnDeletion:
+    """Record a column-deletion audit row (write-only trail)."""
+    record = InstanceColumnDeletion(
+        column_key=column_key,
+        column_label=column_label,
+        ticket_number=ticket_number,
+        revised_by=revised_by,
+        reviewer=reviewer,
+        deleted_by_user_id=deleted_by_user_id,
+    )
+    session.add(record)
+    session.flush()
+    return record
 
 
 # --- Bulk JSONB helpers over instances.custom_fields -----------------

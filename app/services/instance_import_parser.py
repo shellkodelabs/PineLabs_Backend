@@ -145,10 +145,14 @@ def parse_xlsx(
     expected_labels: List[str],
     required_labels: List[str],
 ) -> List[ParsedSheet]:
-    """Every worksheet becomes its own ParsedSheet. Each sheet's header
-    is validated INDEPENDENTLY; a sheet with a bad header emits no rows
-    (its header_errors is set). Sheets may order columns differently —
-    each is re-aligned to the canonical order."""
+    """Only the FIRST non-empty worksheet is processed; any remaining
+    sheets in the workbook are IGNORED entirely (not validated, not
+    imported, not reported). Fully-empty leading sheets are skipped so
+    "first sheet" means the first sheet that actually has content. The
+    chosen sheet's header is validated and its rows re-aligned to the
+    canonical column order; a bad header emits no rows (header_errors is
+    set). Returns a list with at most one ParsedSheet, so the rest of the
+    pipeline (progress tree, counters, errors) is naturally single-sheet."""
     from openpyxl import load_workbook
 
     wb = load_workbook(io.BytesIO(content), read_only=True, data_only=True)
@@ -167,14 +171,17 @@ def parse_xlsx(
                 header_values = values
                 break
             if header_values is None:
-                # Empty sheet — skip entirely (no ParsedSheet emitted).
+                # Empty sheet — skip entirely and keep looking for the
+                # first sheet that has content.
                 continue
 
             col_map, error = _validate_sheet_header(ws.title, header_values, expected_labels, required_labels)
             if error is not None:
                 sheet.header_errors = [error]
                 parsed.append(sheet)
-                continue
+                # First non-empty sheet decided (header invalid) — ignore
+                # all remaining sheets.
+                break
 
             for line, row in sheet_iter:
                 values = list(row)
@@ -188,6 +195,8 @@ def parse_xlsx(
                 sheet.row_labels.append(_row_label(ws.title, line))
                 sheet.row_numbers.append(line)
             parsed.append(sheet)
+            # Only the first non-empty sheet is imported — ignore the rest.
+            break
     finally:
         wb.close()
 

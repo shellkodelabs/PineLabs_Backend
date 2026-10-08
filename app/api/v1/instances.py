@@ -47,7 +47,9 @@ from app.schemas.common import PaginatedResponse
 from app.schemas.instance import (
     CreateInstanceColumnRequest,
     CreateInstanceRequest,
+    DeleteInstanceColumnRequest,
     DeleteInstanceColumnResponse,
+    DeleteInstanceRequest,
     DeleteInstanceResponse,
     ImportInstanceResponse,
     InstanceColumnResponse,
@@ -192,17 +194,15 @@ def _parse_xlsx(
     required_labels: List[str],
 ) -> Tuple[List[str], List[List[object]], List[str], List[str]]:
     """Parse an .xlsx workbook into (headers, data_rows, row_labels,
-    header_errors), COMBINING every sheet — with EACH sheet's header
-    validated INDEPENDENTLY against the system's real expected columns
-    (`expected_labels`/`required_labels`), NOT against the first sheet.
+    header_errors) using ONLY the FIRST non-empty worksheet — any
+    remaining sheets are IGNORED entirely. Fully-empty leading sheets are
+    skipped so "first sheet" means the first sheet with content.
 
-      - A sheet whose header is missing a required column or contains an
-        unknown/misspelled column is reported in `header_errors`, and
-        NONE of its rows are emitted.
-      - Sheets may order their columns differently; each sheet's rows are
-        re-aligned to the canonical `expected_labels` order, so the
-        returned rows are uniform and the service maps columns by the
-        returned `headers` (= expected_labels).
+      - If that sheet's header is missing a required column (or a required
+        column is misspelled), it's reported in `header_errors` and NONE
+        of its rows are emitted.
+      - Its rows are re-aligned to the canonical `expected_labels` order,
+        so the service maps columns by the returned `headers`.
 
     Every data row carries a label ("<SheetName>, row <n>"). Fully blank
     rows are dropped. The header row itself is never emitted as data."""
@@ -228,14 +228,14 @@ def _parse_xlsx(
             header_values = values
             break
         if header_values is None:
-            continue  # empty sheet
+            continue  # empty sheet — keep looking for the first with content
 
         col_map, error = _validate_sheet_header(
             ws.title, header_values, expected_labels, required_labels
         )
         if error is not None:
             header_errors.append(error)
-            continue  # skip this sheet's data entirely
+            break  # first non-empty sheet decided (bad header); ignore the rest
 
         # Emit this sheet's data rows, RE-ALIGNED to the canonical order.
         for line, row in sheet_iter:
@@ -248,6 +248,8 @@ def _parse_xlsx(
             ]
             data_rows.append(aligned)
             row_labels.append(_row_label(ws.title, line))
+        # Only the first non-empty sheet is imported — ignore the rest.
+        break
 
     wb.close()
     return list(expected_labels), data_rows, row_labels, header_errors
@@ -340,6 +342,8 @@ def download_import_template(db: Session = Depends(get_db)) -> StreamingResponse
     headers = [
         instance_service.IMPORT_COLUMN_INSTANCE,
         instance_service.IMPORT_COLUMN_TICKET,
+        instance_service.IMPORT_COLUMN_REVISED_BY,
+        instance_service.IMPORT_COLUMN_REVIEWER,
         instance_service.IMPORT_COLUMN_STATUS,
     ] + [c.label for c in columns]
 
@@ -524,12 +528,17 @@ def update_instance_column(
 
 @router.delete("/columns/{columnId}", response_model=DeleteInstanceColumnResponse)
 def delete_instance_column(
+    payload: DeleteInstanceColumnRequest,
     columnId: int = Path(..., ge=1, description="Instance column id"),
     actor: CurrentUser = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> DeleteInstanceColumnResponse:
-    """Deletes a custom column and strips its values from every instance."""
-    deleted_id = instance_column_service.delete_column(db, column_id=columnId)
+    """Deletes a custom column and strips its values from every instance.
+    Records a deletion audit row (ticket + revised by + reviewer,
+    attributed to the acting user) in instance_column_deletions."""
+    deleted_id = instance_column_service.delete_column(
+        db, column_id=columnId, payload=payload, actor_user_id=actor.id
+    )
     return DeleteInstanceColumnResponse(id=deleted_id, deleted=True)
 
 
@@ -572,11 +581,14 @@ def update_instance(
 
 @router.delete("/{instanceId}", response_model=DeleteInstanceResponse)
 def delete_instance(
+    payload: DeleteInstanceRequest,
     instanceId: int = Path(..., ge=1, description="Instance id"),
     actor: CurrentUser = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> DeleteInstanceResponse:
-    """Deletes an instance. Records a "delete" audit revision attributed
-    to the authenticated caller, preserving the deleted instance's id as
-    the revision's entity_id."""
-    return instance_service.delete_instance(db, instance_id=instanceId, actor_user_id=actor.id)
+    """Deletes an instance and records a deletion audit row (ticket +
+    revised by + reviewer, attributed to the acting user) in
+    instance_deletions."""
+    return instance_service.delete_instance(
+        db, instance_id=instanceId, payload=payload, actor_user_id=actor.id
+    )

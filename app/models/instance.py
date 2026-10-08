@@ -90,6 +90,15 @@ class Instance(Base):
     # relate to more than one instance.
     ticket_number: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
 
+    # Audit trail for who revised the instance and who reviewed that
+    # change — captured alongside the ticket number on every create/edit
+    # from the Instance Management UI (the form makes both mandatory).
+    # Stored nullable at the DB level so pre-existing rows (and the
+    # import path, which doesn't collect them) don't break; the API's
+    # create schema enforces presence for interactive add/edit.
+    revised_by: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    reviewer: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+
     # Nullable FK, ON DELETE SET NULL — see module docstring. Set to the
     # acting user on create and on every update, so the UI's "UPDATED BY"
     # column always reflects who last touched the instance.
@@ -149,6 +158,15 @@ class InstanceColumn(Base):
     type: Mapped[str] = mapped_column(String(20), nullable=False, server_default=text("'text'"))
 
     required: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+
+    # Audit trail for the LAST change to this column definition (add or
+    # rename) — the ticket this change relates to plus who revised and
+    # reviewed it. Captured from the Add Column / Rename Column dialogs,
+    # which make all three mandatory. Nullable at the DB level so legacy
+    # rows (created before this was added) don't break.
+    ticket_number: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    revised_by: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    reviewer: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
 
     # Value applied to existing instances when the column is added, and
     # the fallback for optional cells left blank on later writes. Stored
@@ -228,3 +246,91 @@ class InstanceBuiltinColumn(Base):
 
     def __repr__(self) -> str:  # pragma: no cover - debugging aid only
         return f"<InstanceBuiltinColumn key={self.key!r} sort_order={self.sort_order}>"
+
+
+class InstanceColumnDeletion(Base):
+    """
+    Audit record of a DELETED custom column.
+
+    When a custom column is removed, its definition row (instance_columns)
+    is gone — so the add/rename audit fields that live on that row vanish
+    with it. This table preserves the deletion event: which column was
+    deleted (its key + label at the time), the ticket it related to, who
+    revised and reviewed the change, who performed it, and when.
+
+    This is a WRITE-ONLY audit trail for Instance Management, kept
+    separate from the shared `revisions` log (Instance Management is
+    intentionally decoupled from that). Rows are never updated or deleted
+    by the app.
+
+    `deleted_by_user_id` is a NULLABLE FK ON DELETE SET NULL — same
+    reasoning as elsewhere: removing a user later must not break or erase
+    an existing audit row; only the attribution clears.
+    """
+
+    __tablename__ = "instance_column_deletions"
+    __table_args__ = (Index("ix_instance_column_deletions_deleted_at", text("deleted_at DESC")),)
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(always=True), primary_key=True)
+
+    # The deleted column's stable key and human label, captured at delete
+    # time (the definition row no longer exists to look them up).
+    column_key: Mapped[str] = mapped_column(String(100), nullable=False)
+    column_label: Mapped[str] = mapped_column(String(100), nullable=False)
+
+    # Audit trail captured in the Delete Column dialog (all mandatory).
+    ticket_number: Mapped[str] = mapped_column(String(100), nullable=False)
+    revised_by: Mapped[str] = mapped_column(String(255), nullable=False)
+    reviewer: Mapped[str] = mapped_column(String(255), nullable=False)
+
+    deleted_by_user_id: Mapped[Optional[int]] = mapped_column(
+        BigInteger, ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    deleted_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    deleted_by_user: Mapped[Optional["User"]] = relationship(foreign_keys=[deleted_by_user_id])
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid only
+        return f"<InstanceColumnDeletion id={self.id} column_key={self.column_key!r}>"
+
+
+class InstanceDeletion(Base):
+    """
+    Audit record of a DELETED instance.
+
+    When an instance is removed, its row (and the ticket/revised_by/
+    reviewer stamped on it) is gone — so this table preserves the deletion
+    event: which instance was deleted (its id + name at the time), the
+    ticket it related to, who revised and reviewed the change, who
+    performed it, and when. Write-only audit trail, kept separate from the
+    shared `revisions` log (Instance Management is intentionally
+    decoupled). Mirrors InstanceColumnDeletion.
+    """
+
+    __tablename__ = "instance_deletions"
+    __table_args__ = (Index("ix_instance_deletions_deleted_at", text("deleted_at DESC")),)
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(always=True), primary_key=True)
+
+    # The deleted instance's id and name, captured at delete time.
+    instance_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    instance_name: Mapped[str] = mapped_column(String(255), nullable=False)
+
+    # Audit trail captured in the Delete Instance dialog (all mandatory).
+    ticket_number: Mapped[str] = mapped_column(String(100), nullable=False)
+    revised_by: Mapped[str] = mapped_column(String(255), nullable=False)
+    reviewer: Mapped[str] = mapped_column(String(255), nullable=False)
+
+    deleted_by_user_id: Mapped[Optional[int]] = mapped_column(
+        BigInteger, ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    deleted_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    deleted_by_user: Mapped[Optional["User"]] = relationship(foreign_keys=[deleted_by_user_id])
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid only
+        return f"<InstanceDeletion id={self.id} instance_id={self.instance_id} name={self.instance_name!r}>"

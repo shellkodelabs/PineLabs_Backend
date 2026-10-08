@@ -22,10 +22,11 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.exceptions import ConflictError, NotFoundError, ValidationError
-from app.models.instance import BUILTIN_COLUMN_DEFS, COLUMN_TYPE_VALUES, InstanceColumn
+from app.models.instance import BUILTIN_COLUMN_DEFS, InstanceColumn
 from app.repositories import instance_column_repository
 from app.schemas.instance import (
     CreateInstanceColumnRequest,
+    DeleteInstanceColumnRequest,
     InstanceColumnResponse,
     InstanceColumnsResponse,
     LayoutColumnResponse,
@@ -58,11 +59,7 @@ def _ordered_builtins(db: Session) -> List[dict]:
 # the column has no default (product decision — never store empty/NULL).
 _MISSING_PLACEHOLDER = "NA"
 
-# Cells whose text means "no real value" — treated as blank so a required
-# column rejects them and an optional column falls back to default/NA.
-_BLANK_TOKENS = {"", "na", "n/a", "n.a", "n.a.", "null", "none", "-"}
 
-_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
 # ---------------------------------------------------------------------
@@ -79,6 +76,9 @@ def _to_response(column: InstanceColumn) -> InstanceColumnResponse:
         options=column.options,
         afterKey=column.after_key,
         sortOrder=column.sort_order,
+        ticketNumber=column.ticket_number,
+        revisedBy=column.revised_by,
+        reviewer=column.reviewer,
     )
 
 
@@ -215,50 +215,18 @@ def _require_column(db: Session, column_id: int) -> InstanceColumn:
     return column
 
 
-def _validate_dropdown_options(type_: str, options: Optional[List[str]]) -> Optional[List[str]]:
-    """A dropdown column needs at least one non-blank option; other types
-    ignore options (stored as NULL)."""
-    if type_ != "dropdown":
-        return None
-    cleaned = [o.strip() for o in (options or []) if o and o.strip()]
-    if not cleaned:
-        raise ValidationError(
-            "A dropdown column requires at least one option.",
-            code="INSTANCE_COLUMN_OPTIONS_REQUIRED",
-        )
-    return cleaned
-
-
 def create_column(db: Session, payload: CreateInstanceColumnRequest) -> InstanceColumnResponse:
     label = payload.label.strip()
     if instance_column_repository.get_by_label(db, label) is not None:
         raise ConflictError(f"A column already exists with label={label!r}.", code="INSTANCE_COLUMN_LABEL_EXISTS")
 
-    if payload.type not in COLUMN_TYPE_VALUES:
-        raise ValidationError(f"type must be one of {COLUMN_TYPE_VALUES}.", code="INSTANCE_COLUMN_INVALID_TYPE")
-
-    options = _validate_dropdown_options(payload.type, payload.options)
     _validate_after_key(db, payload.afterKey)
 
-    # A required column must have a non-blank default so existing
-    # instances (backfilled now) don't end up violating "required".
-    default_value = payload.defaultValue
-    if payload.required and not (default_value and default_value.strip()):
-        raise ValidationError(
-            "A required column must have a non-blank default value "
-            "(it is applied to existing instances that have no value yet).",
-            code="INSTANCE_COLUMN_DEFAULT_REQUIRED",
-        )
-
-    # Validate the default itself against the column's own type/options.
-    backfill_value = _coerce_value(
-        default_value if default_value is not None else "",
-        type_=payload.type,
-        required=payload.required,
-        default=None,  # no fallback while validating the default itself
-        options=options,
-        column_label=label,
-    )
+    # Custom columns are plain free text now — no type/required/dropdown
+    # validation. The default (if any) is just trimmed; existing rows are
+    # backfilled with it, or with the 'NA' placeholder when no default.
+    default_value = payload.defaultValue.strip() if payload.defaultValue else None
+    backfill_value = default_value if default_value else _MISSING_PLACEHOLDER
 
     key = _unique_key(db, _slugify_key(label))
 
@@ -268,15 +236,20 @@ def create_column(db: Session, payload: CreateInstanceColumnRequest) -> Instance
                 db,
                 key=key,
                 label=label,
-                type_=payload.type,
-                required=payload.required,
+                # Always a plain text, optional column.
+                type_="text",
+                required=False,
                 default_value=default_value,
-                options=options,
+                options=None,
                 sort_order=instance_column_repository.next_sort_order(db),
                 after_key=payload.afterKey,
+                # Audit trail (mandatory, schema-enforced non-blank).
+                ticket_number=payload.ticketNumber,
+                revised_by=payload.revisedBy,
+                reviewer=payload.reviewer,
             )
-            # Backfill every existing instance with the resolved default
-            # (or NA) so no row is missing this key.
+            # Backfill every existing instance with the default (or NA) so
+            # no row is missing this key.
             instance_column_repository.backfill_key(db, key=key, value=backfill_value)
     except IntegrityError as exc:
         raise ConflictError(
@@ -303,22 +276,20 @@ def update_column(db: Session, *, column_id: int, payload: UpdateInstanceColumnR
                 )
             fields["label"] = new_label
 
-    if payload.options is not None:
-        fields["options"] = _validate_dropdown_options(column.type, payload.options)
-
+    # Custom columns are plain text now — no type/required/dropdown rules.
+    # `options`/`required` in the payload are ignored; only the default
+    # value (plain text) can still be changed.
     if payload.defaultValue is not None:
         fields["default_value"] = payload.defaultValue.strip() or None
 
-    if payload.required is not None:
-        fields["required"] = payload.required
-        # If flipping to required, ensure there is a non-blank default to
-        # fall back on (existing rows may hold NA otherwise).
-        resulting_default = fields.get("default_value", column.default_value)
-        if payload.required and not (resulting_default and str(resulting_default).strip()):
-            raise ValidationError(
-                "A required column must have a non-blank default value.",
-                code="INSTANCE_COLUMN_DEFAULT_REQUIRED",
-            )
+    # Audit trail — the Rename Column dialog sends all three. Persist
+    # whichever are provided (validators already enforced non-blank).
+    if payload.ticketNumber is not None:
+        fields["ticket_number"] = payload.ticketNumber
+    if payload.revisedBy is not None:
+        fields["revised_by"] = payload.revisedBy
+    if payload.reviewer is not None:
+        fields["reviewer"] = payload.reviewer
 
     # Repositioning: `afterKey` is Optional[str] where None legitimately
     # means "move to the very start", so we distinguish "provided" from
@@ -341,14 +312,32 @@ def update_column(db: Session, *, column_id: int, payload: UpdateInstanceColumnR
     return _to_response(column)
 
 
-def delete_column(db: Session, *, column_id: int) -> int:
+def delete_column(
+    db: Session,
+    *,
+    column_id: int,
+    payload: DeleteInstanceColumnRequest,
+    actor_user_id: int,
+) -> int:
     column = _require_column(db, column_id)
     deleted_id = column.id
     key = column.key
+    label = column.label
     with db.begin_nested():
+        # Record the deletion audit FIRST (captures the column's key/label
+        # before the row is gone), then delete the column and strip its
+        # key from every instance's custom_fields. All in one savepoint,
+        # so either the whole deletion (audit + removal) commits or none.
+        instance_column_repository.create_deletion(
+            db,
+            column_key=key,
+            column_label=label,
+            ticket_number=payload.ticketNumber,
+            revised_by=payload.revisedBy,
+            reviewer=payload.reviewer,
+            deleted_by_user_id=actor_user_id,
+        )
         instance_column_repository.delete(db, column)
-        # Strip the key from every instance's custom_fields so no orphaned
-        # values linger.
         instance_column_repository.remove_key(db, key=key)
     return deleted_id
 
@@ -416,65 +405,36 @@ def reorder_columns(db: Session, *, ordered_keys: List[str]) -> List[LayoutColum
 # Value coercion / validation (shared by create/update/import)
 # ---------------------------------------------------------------------
 def _is_blank(value: Any) -> bool:
-    return value is None or str(value).strip().lower() in _BLANK_TOKENS
+    """Blank ONLY when empty or whitespace-only. An NA-style placeholder
+    (NA/na/null/none/-) is NOT blank — it's a real typed value and is
+    stored verbatim. The only checkpoint is 'not empty'; a truly empty
+    optional cell falls back to the column default / NA placeholder."""
+    return value is None or not str(value).strip()
 
 
 def _coerce_value(
     raw: Any,
     *,
-    type_: str,
-    required: bool,
-    default: Optional[str],
-    options: Optional[List[str]],
-    column_label: str,
+    type_: str = "text",
+    required: bool = False,
+    default: Optional[str] = None,
+    options: Optional[List[str]] = None,
+    column_label: str = "",
 ) -> Any:
-    """Validate + coerce one cell against its column definition. Blank
-    optional -> default, or 'NA' if no default. Blank required -> error.
-    Returns the value to store (native types for number, string
-    otherwise)."""
+    """Resolve one custom-column cell to the value to STORE. There is NO
+    data-type validation anymore — every custom column is plain free text,
+    so the value is simply trimmed and stored as a string. A blank cell
+    falls back to the column's default (if any), otherwise the 'NA'
+    placeholder so a cell is never stored empty/ambiguous.
+
+    The `type_`/`required`/`options`/`column_label` parameters are kept
+    only so the existing call sites don't have to change; they are
+    ignored. Nothing here ever raises."""
     if _is_blank(raw):
-        if required:
-            raise ValidationError(
-                f"'{column_label}' is required.",
-                code="INSTANCE_CUSTOM_FIELD_REQUIRED",
-            )
         if default is not None and str(default).strip():
-            raw = default
-        else:
-            return _MISSING_PLACEHOLDER
-
-    text = str(raw).strip()
-
-    if type_ == "number":
-        try:
-            # Keep ints as ints, else float.
-            return int(text) if re.fullmatch(r"-?\d+", text) else float(text)
-        except ValueError:
-            raise ValidationError(
-                f"'{column_label}' must be a number (got {text!r}).",
-                code="INSTANCE_CUSTOM_FIELD_INVALID_NUMBER",
-            )
-
-    if type_ == "date":
-        if not _DATE_RE.match(text):
-            raise ValidationError(
-                f"'{column_label}' must be a date in YYYY-MM-DD format (got {text!r}).",
-                code="INSTANCE_CUSTOM_FIELD_INVALID_DATE",
-            )
-        return text
-
-    if type_ == "dropdown":
-        allowed = options or []
-        # Case-insensitive match, but store the canonical option casing.
-        match = next((o for o in allowed if o.lower() == text.lower()), None)
-        if match is None:
-            raise ValidationError(
-                f"'{column_label}' must be one of {allowed} (got {text!r}).",
-                code="INSTANCE_CUSTOM_FIELD_INVALID_OPTION",
-            )
-        return match
-
-    return text  # text
+            return str(default).strip()
+        return _MISSING_PLACEHOLDER
+    return str(raw).strip()
 
 
 def coerce_row_custom_fields(
@@ -484,20 +444,13 @@ def coerce_row_custom_fields(
     columns: Optional[List] = None,
 ) -> "tuple[Dict[str, Any], List[str]]":
     """
-    Import-row variant of the custom-field coercion that COLLECTS every
-    problem instead of raising on the first. For each custom column
-    present in `incoming` (keyed by column key), it validates/coerces the
-    cell and, on failure, appends the human message to `errors` rather
-    than aborting — so a single row can report ALL its bad columns at once
-    (e.g. a missing required Region AND a non-numeric Total Count).
+    Import-row variant: resolve the custom-column cells present in
+    `incoming` to their stored string values. Custom columns are plain
+    text with no type/required rules, so this NEVER produces errors — the
+    returned error list is always empty. The signature is kept (returns
+    (coerced, errors)) so the import caller doesn't have to change.
 
-    Returns (coerced, errors):
-      - coerced: {key: value} for the columns that validated OK (only the
-        columns in `incoming`; callers backfill absent columns at write
-        time via coerce_and_validate_custom_fields(partial=False)).
-      - errors:  [str, ...] one per failed column (empty if all OK).
-
-    `columns` may be passed in to avoid a repeat DB fetch when validating
+    `columns` may be passed in to avoid a repeat DB fetch when processing
     many rows; otherwise it's loaded once here.
     """
     if columns is None:
@@ -510,7 +463,6 @@ def coerce_row_custom_fields(
         normalized[str(k).strip().lower()] = v
 
     coerced: Dict[str, Any] = {}
-    errors: List[str] = []
 
     for col in columns:
         key_l = col.key.lower()
@@ -520,23 +472,12 @@ def coerce_row_custom_fields(
         elif label_l in normalized:
             raw = normalized[label_l]
         else:
-            # Column not present in this row's incoming set — skip it here;
-            # required-ness for a PRESENT header is enforced below, and a
-            # missing required HEADER is caught at the sheet level.
+            # Column not present in this row's incoming set — skip it;
+            # absent columns are backfilled at write time.
             continue
-        try:
-            coerced[col.key] = _coerce_value(
-                raw,
-                type_=col.type,
-                required=col.required,
-                default=col.default_value,
-                options=col.options,
-                column_label=col.label,
-            )
-        except ValidationError as exc:
-            errors.append(exc.message)
+        coerced[col.key] = _coerce_value(raw, default=col.default_value)
 
-    return coerced, errors
+    return coerced, []
 
 
 def coerce_and_validate_custom_fields(
@@ -547,8 +488,10 @@ def coerce_and_validate_custom_fields(
     partial: bool = False,
 ) -> Dict[str, Any]:
     """
-    Build the custom_fields map to store for an instance, validated
-    against ALL current column definitions.
+    Build the custom_fields map to store for an instance. Custom columns
+    are plain free text — there is NO data-type or required validation;
+    each supplied value is simply trimmed and stored (blank -> the
+    column default, or 'NA' if none).
 
     - `incoming` may key values by column KEY or by column LABEL
       (case-insensitive) — imports use labels (the header text), the API
@@ -556,9 +499,8 @@ def coerce_and_validate_custom_fields(
     - `existing` is the instance's current custom_fields (for updates),
       so untouched columns keep their value.
     - `partial=True` (update): a column not present in `incoming` keeps
-      its existing value and is NOT re-required. `partial=False`
-      (create/import row): every column is resolved, applying
-      required/default/NA rules.
+      its existing value. `partial=False` (create/import row): every
+      column is resolved, filling absent cells with default/NA.
     """
     columns = instance_column_repository.list_all(db)
     existing = existing or {}
@@ -585,17 +527,10 @@ def coerce_and_validate_custom_fields(
         elif supplied_label:
             raw = normalized[col.label.strip().lower()]
         elif not partial:
-            # create/import row didn't supply it: treat as blank so
-            # required/default/NA rules kick in.
+            # create/import row didn't supply it: treat as blank so the
+            # default/NA fallback kicks in.
             raw = existing.get(col.key)
 
-        result[col.key] = _coerce_value(
-            raw,
-            type_=col.type,
-            required=col.required,
-            default=col.default_value,
-            options=col.options,
-            column_label=col.label,
-        )
+        result[col.key] = _coerce_value(raw, default=col.default_value)
 
     return result

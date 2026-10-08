@@ -63,6 +63,8 @@ class InstanceResponse(BaseModel):
     issuerCount: int = 0
     status: str
     ticketNumber: Optional[str] = None
+    revisedBy: Optional[str] = None
+    reviewer: Optional[str] = None
     # Values for the user-defined custom columns, keyed by column key
     # (see InstanceColumn). Always present (possibly empty).
     customFields: Dict[str, Any] = Field(default_factory=dict)
@@ -77,6 +79,11 @@ class CreateInstanceRequest(BaseModel):
     ticketNumber: Optional[str] = Field(
         None, max_length=100, description="Optional reference ticket, e.g. 'INC1234'."
     )
+    # Audit trail — mandatory on an interactive create (the Instance
+    # Management form requires both). Enforced non-blank by the validator
+    # below; stored on the instance row for the audit trail.
+    revisedBy: str = Field(..., min_length=1, max_length=255, description="Who revised the instance.")
+    reviewer: str = Field(..., min_length=1, max_length=255, description="Who reviewed the change.")
     # Values for custom columns, keyed by column key. Validated/coerced
     # against the column definitions by the service layer (required cols
     # enforced; skipped optional cols default to their default/NA).
@@ -92,6 +99,16 @@ class CreateInstanceRequest(BaseModel):
     def _normalize_optional(cls, value: Optional[str]) -> Optional[str]:
         return _normalize_optional_text(value)
 
+    @field_validator("revisedBy")
+    @classmethod
+    def _validate_revised_by(cls, value: str) -> str:
+        return _reject_blank(value, "revisedBy")
+
+    @field_validator("reviewer")
+    @classmethod
+    def _validate_reviewer(cls, value: str) -> str:
+        return _reject_blank(value, "reviewer")
+
 
 class UpdateInstanceRequest(BaseModel):
     """All fields optional — a partial update. A field omitted from the
@@ -101,6 +118,10 @@ class UpdateInstanceRequest(BaseModel):
     name: Optional[str] = Field(None, min_length=1, max_length=255)
     status: Optional[Status] = None
     ticketNumber: Optional[str] = Field(None, max_length=100)
+    # Audit trail. On an interactive edit the UI sends both (mandatory in
+    # the form); omitted = unchanged. When provided they must be non-blank.
+    revisedBy: Optional[str] = Field(None, min_length=1, max_length=255)
+    reviewer: Optional[str] = Field(None, min_length=1, max_length=255)
     # If provided, custom column values to merge in (validated/coerced by
     # the service). Omitted = leave all custom fields unchanged.
     customFields: Optional[Dict[str, Any]] = None
@@ -116,6 +137,44 @@ class UpdateInstanceRequest(BaseModel):
     @classmethod
     def _normalize_optional(cls, value: Optional[str]) -> Optional[str]:
         return _normalize_optional_text(value)
+
+    @field_validator("revisedBy")
+    @classmethod
+    def _validate_revised_by(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return value
+        return _reject_blank(value, "revisedBy")
+
+    @field_validator("reviewer")
+    @classmethod
+    def _validate_reviewer(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return value
+        return _reject_blank(value, "reviewer")
+
+
+class DeleteInstanceRequest(BaseModel):
+    """Audit trail captured in the Delete Instance dialog — all mandatory.
+    Recorded in instance_deletions before the instance row is removed."""
+
+    ticketNumber: str = Field(..., min_length=1, max_length=100, description="Ticket this deletion relates to.")
+    revisedBy: str = Field(..., min_length=1, max_length=255, description="Who revised (performed) the deletion.")
+    reviewer: str = Field(..., min_length=1, max_length=255, description="Who reviewed the deletion.")
+
+    @field_validator("ticketNumber")
+    @classmethod
+    def _validate_ticket(cls, value: str) -> str:
+        return _reject_blank(value, "ticketNumber")
+
+    @field_validator("revisedBy")
+    @classmethod
+    def _validate_revised_by(cls, value: str) -> str:
+        return _reject_blank(value, "revisedBy")
+
+    @field_validator("reviewer")
+    @classmethod
+    def _validate_reviewer(cls, value: str) -> str:
+        return _reject_blank(value, "reviewer")
 
 
 class DeleteInstanceResponse(BaseModel):
@@ -159,6 +218,10 @@ class InstanceColumnResponse(BaseModel):
     options: Optional[List[str]] = None
     afterKey: Optional[str] = None
     sortOrder: int
+    # Audit trail for the last add/rename of this column.
+    ticketNumber: Optional[str] = None
+    revisedBy: Optional[str] = None
+    reviewer: Optional[str] = None
 
 
 class CreateInstanceColumnRequest(BaseModel):
@@ -179,6 +242,11 @@ class CreateInstanceColumnRequest(BaseModel):
             "or another custom column's key). Omit / null = at the very beginning."
         ),
     )
+    # Audit trail — mandatory when adding a column (the Add Column dialog
+    # requires all three). Persisted on the column row.
+    ticketNumber: str = Field(..., min_length=1, max_length=100, description="Ticket this column change relates to.")
+    revisedBy: str = Field(..., min_length=1, max_length=255, description="Who revised the column.")
+    reviewer: str = Field(..., min_length=1, max_length=255, description="Who reviewed the change.")
 
     @field_validator("label")
     @classmethod
@@ -189,6 +257,21 @@ class CreateInstanceColumnRequest(BaseModel):
     @classmethod
     def _normalize_default(cls, value: Optional[str]) -> Optional[str]:
         return _normalize_optional_text(value)
+
+    @field_validator("ticketNumber")
+    @classmethod
+    def _validate_ticket(cls, value: str) -> str:
+        return _reject_blank(value, "ticketNumber")
+
+    @field_validator("revisedBy")
+    @classmethod
+    def _validate_revised_by(cls, value: str) -> str:
+        return _reject_blank(value, "revisedBy")
+
+    @field_validator("reviewer")
+    @classmethod
+    def _validate_reviewer(cls, value: str) -> str:
+        return _reject_blank(value, "reviewer")
 
 
 class UpdateInstanceColumnRequest(BaseModel):
@@ -203,6 +286,11 @@ class UpdateInstanceColumnRequest(BaseModel):
     afterKey: Optional[str] = Field(
         None, description="Reposition after this column key (see CreateInstanceColumnRequest.afterKey)."
     )
+    # Audit trail — the Rename Column dialog sends all three; omitted =
+    # unchanged. When provided they must be non-blank.
+    ticketNumber: Optional[str] = Field(None, min_length=1, max_length=100)
+    revisedBy: Optional[str] = Field(None, min_length=1, max_length=255)
+    reviewer: Optional[str] = Field(None, min_length=1, max_length=255)
 
     @field_validator("label")
     @classmethod
@@ -210,6 +298,27 @@ class UpdateInstanceColumnRequest(BaseModel):
         if value is None:
             return value
         return _reject_blank(value, "label")
+
+    @field_validator("ticketNumber")
+    @classmethod
+    def _validate_ticket(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return value
+        return _reject_blank(value, "ticketNumber")
+
+    @field_validator("revisedBy")
+    @classmethod
+    def _validate_revised_by(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return value
+        return _reject_blank(value, "revisedBy")
+
+    @field_validator("reviewer")
+    @classmethod
+    def _validate_reviewer(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return value
+        return _reject_blank(value, "reviewer")
 
 
 class ReorderInstanceColumnsRequest(BaseModel):
@@ -225,6 +334,31 @@ class ReorderInstanceColumnsRequest(BaseModel):
     keys — no more, no fewer."""
 
     orderedKeys: List[str] = Field(..., min_length=1)
+
+
+class DeleteInstanceColumnRequest(BaseModel):
+    """Audit trail captured in the Delete Column dialog — all mandatory.
+    Recorded in instance_column_deletions before the column row is
+    removed."""
+
+    ticketNumber: str = Field(..., min_length=1, max_length=100, description="Ticket this deletion relates to.")
+    revisedBy: str = Field(..., min_length=1, max_length=255, description="Who revised (performed) the deletion.")
+    reviewer: str = Field(..., min_length=1, max_length=255, description="Who reviewed the deletion.")
+
+    @field_validator("ticketNumber")
+    @classmethod
+    def _validate_ticket(cls, value: str) -> str:
+        return _reject_blank(value, "ticketNumber")
+
+    @field_validator("revisedBy")
+    @classmethod
+    def _validate_revised_by(cls, value: str) -> str:
+        return _reject_blank(value, "revisedBy")
+
+    @field_validator("reviewer")
+    @classmethod
+    def _validate_reviewer(cls, value: str) -> str:
+        return _reject_blank(value, "reviewer")
 
 
 class DeleteInstanceColumnResponse(BaseModel):

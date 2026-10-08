@@ -81,7 +81,8 @@ def submit_import_job(
 
     if not file_payloads:
         raise ValidationError("No files were uploaded.", code="IMPORT_NO_FILES")
-    if len(file_payloads) > settings.IMPORT_MAX_FILES:
+    # IMPORT_MAX_FILES <= 0 means NO per-request file-count limit.
+    if settings.IMPORT_MAX_FILES > 0 and len(file_payloads) > settings.IMPORT_MAX_FILES:
         raise ValidationError(
             f"Too many files: {len(file_payloads)} (max {settings.IMPORT_MAX_FILES}).",
             code="IMPORT_TOO_MANY_FILES",
